@@ -98,28 +98,55 @@ def plot_user_timeline(trips, enriched_locs, y_offset, ax, user_id, day_date):
         ax.hlines(y=y_offset, xmin=st_local, xmax=et_local, 
                  color=color, linewidth=8, alpha=0.8)
 
-def visualize_original_timelines(n_users=20, users_per_page=20, figsize=(16, 12)):
+def get_original_user_ids():
+    """Get user IDs from the original Milano IMNs file."""
+    original_user_ids = set()
+    try:
+        with gzip.open('data/milano_2007_imns.json.gz', 'rt', encoding='utf-8') as f:
+            for line in f:
+                imn = json.loads(line.strip())
+                if 'uid' in imn:
+                    original_user_ids.add(imn['uid'])
+        print(f"Found {len(original_user_ids)} users in original Milano IMNs file")
+        return original_user_ids
+    except Exception as e:
+        print(f"Error reading original file: {e}")
+        return set()
+
+def visualize_original_timelines(n_users=None, users_per_page=20, figsize=(16, 12)):
     """
     Visualize original timelines for multiple users in a compact format.
     
     Args:
-        n_users: Number of users to visualize
+        n_users: Number of users to visualize (None for all original users)
         users_per_page: Number of users per page
         figsize: Figure size (width, height)
     """
     print("Loading data...")
     
-    # Load IMNs and POI data
-    imns = imn_loading.read_imn('data/milano_2007_imns.json.gz')
-    poi_data = read_poi_data('data/milano_2007_imns_pois.json.gz')
+    # Get original user IDs
+    original_user_ids = get_original_user_ids()
+    
+    # Load IMNs and POI data from the test file
+    imns = imn_loading.read_imn('data/test_milano_imns.json.gz')
+    poi_data = read_poi_data('data/test_milano_imns_pois.json.gz')
     
     print(f"Loaded {len(imns)} IMNs and POI data for {len(poi_data)} users")
     
-    # Select users that have POI data
-    available_users = [uid for uid in list(imns.keys()) if int(uid) in poi_data]
+    # Filter to only include users that exist in both the test file and the original file
+    available_users = [uid for uid in list(imns.keys()) 
+                      if int(uid) in poi_data and int(uid) in original_user_ids]
+    
+    if n_users is None:
+        n_users = len(available_users)
+    
     selected_users = available_users[:n_users]
     
-    print(f"Selected {len(selected_users)} users for visualization")
+    print(f"Selected {len(selected_users)} users for visualization (from {len(available_users)} available)")
+    
+    if not selected_users:
+        print("No users found that exist in both files!")
+        return
     
     # Group users by pages
     pages = [selected_users[i:i + users_per_page] for i in range(0, len(selected_users), users_per_page)]
@@ -190,13 +217,13 @@ def visualize_original_timelines(n_users=20, users_per_page=20, figsize=(16, 12)
         
         plt.tight_layout(rect=[0, 0, 0.85, 0.95])
         
-        # Save figure
-        output_filename = f"original_timelines_page_{page_idx + 1}.png"
+        # Save figure to results folder
+        output_filename = f"results/original_milano_original_timelines/original_timelines_page_{page_idx + 1}.png"
         plt.savefig(output_filename, dpi=300, bbox_inches='tight')
         print(f"Saved {output_filename}")
         
         plt.show()
 
 if __name__ == "__main__":
-    # Visualize 20 users with 20 users per page
-    visualize_original_timelines(n_users=20, users_per_page=20) 
+    # Visualize all original users with 20 users per page
+    visualize_original_timelines(n_users=None, users_per_page=20) 
