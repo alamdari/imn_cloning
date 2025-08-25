@@ -4,7 +4,11 @@ data/*
 
 # Results folder - ignore contents but keep folder
 results/*
+stay_visualizations5/*
+cache/*
+!stay_visualizations5/.gitkeep
 !results/.gitkeep
+!cache/.gitkeep
 
 # Python
 __pycache__/
