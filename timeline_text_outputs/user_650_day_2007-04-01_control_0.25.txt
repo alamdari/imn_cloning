@@ -1,0 +1,17 @@
+Timeline Comparison for User 650, Day 2007-04-01, Control Level 0.25
+================================================================================
+
+ORIGINAL TIMELINE:
+----------------------------------------
+ 1. unknown      | 15:50 - 18:37 | Duration: 166min
+ 2. home         | 18:37 - 00:00 | Duration: 322min
+
+SYNTHETIC TIMELINE:
+----------------------------------------
+ 1. unknown      | 15:31 - 17:07 | Duration:  96min
+ 2. home         | 17:07 - 00:00 | Duration: 412min
+
+================================================================================
+Control Level: 0.25 (Copy Probability: 0.75)
+Original stays: 2, Synthetic stays: 2
+Generated at: 2025-08-25 06:30:21
