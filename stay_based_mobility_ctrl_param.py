@@ -13,8 +13,8 @@ import random
 import imn_loading
 
 # Create output directory for visualizations
-VISUALIZATION_DIR = "stay_visualizations5"
-PROBABILITY_VIS_DIR = "probability_visualizations5"
+VISUALIZATION_DIR = "stay_visualizations6"
+PROBABILITY_VIS_DIR = "probability_visualizations6"
 if not os.path.exists(VISUALIZATION_DIR):
     os.makedirs(VISUALIZATION_DIR)
 if not os.path.exists(PROBABILITY_VIS_DIR):
@@ -29,16 +29,16 @@ ADD_TRIP_GAPS = True  # Add gaps between stays to represent trips
 TRIP_GAP_JITTER = True  # Jitter trip gap durations
 
 # Control parameter for behavior replication
-CONTROL_LEVEL = 0.5  # Range: 0 (fully random) to 1 (user-specific clone)
-# 0 = Use only global distributions (fully randomized)
-# 1 = Use only user-specific distributions (minimal randomness, cloning)
-# 0.5 = Mix user-specific and global distributions
+CONTROL_LEVEL = 0.5  # For distribution interpolation: 0=global (random), 1=user-specific (clone)
+# Synthetic generation randomness (per colleague suggestions) is derived at call site as:
+# copy_probability = 1 - control_level
 
 def read_poi_data(filepath):
     poi_data = {}
     with gzip.open(filepath, 'rt', encoding='utf-8') as f:
         for line in f:
             row = json.loads(line)
+            # Keep UID as int to match IMN data format
             poi_data[row['uid']] = row
     return poi_data
 
@@ -439,7 +439,7 @@ def interpolate_distributions(user_dist, global_dist, control_level):
     elif control_level == 1:
         return user_dist
     else:
-        # For duration distributions (hist, bins format)
+        # For duration distributions (hist, bins format) - check this first
         if isinstance(user_dist, tuple) and isinstance(global_dist, tuple):
             user_hist, user_bins = user_dist
             global_hist, global_bins = global_dist
@@ -519,102 +519,155 @@ def safe_jitter_time(base_time, jitter_amount, min_time=None, max_time=None):
     
     return jittered_time
 
+def _coin_flip_activity(prev_activity, original_activity, transition_probs, copy_probability):
+    """Choose next activity using coin flip method.
+    With probability copy_probability, copy the original activity; otherwise sample from transition_probs.
+    """
+    if np.random.random() < copy_probability and original_activity is not None:
+        return original_activity
+    return sample_next_activity(prev_activity if prev_activity is not None else original_activity, transition_probs)
+
+def _blend_duration(original_duration, sampled_duration, copy_probability):
+    """Convex combination of durations per colleague suggestions: d = p*orig + (1-p)*sampled."""
+    if original_duration is None:
+        return sampled_duration
+    if sampled_duration is None:
+        return original_duration
+    return copy_probability * original_duration + (1.0 - copy_probability) * sampled_duration
+
+def _build_segment_from_original(original_segment, seg_start_ts, seg_end_ts,
+                                 duration_probs, transition_probs, copy_probability):
+    """Build a synthetic segment (before or after anchor) following colleague suggestions.
+    - At each step, flip coin to decide: copy original activity OR sample from distributions
+    - Duration = p*orig + (1-p)*sampled (convex combination)
+    - Enforce alignment: if last overlaps end -> cut; if ends early -> rescale durations to fit exactly
+    """
+    synthetic = []
+    t_cursor = seg_start_ts
+    prev_activity = None
+    
+    # Process each original stay in sequence
+    for stay in original_segment:
+        # Coin flip for activity: copy original OR sample from transition probs
+        if np.random.random() < copy_probability:
+            # Copy original activity exactly
+            act = stay.activity_label
+            orig_dur = max(0, (stay.end_time or seg_end_ts) - (stay.start_time or seg_start_ts))
+        else:
+            # Sample from transition probabilities
+            act = sample_next_activity(prev_activity if prev_activity is not None else stay.activity_label, transition_probs)
+            orig_dur = max(0, (stay.end_time or seg_end_ts) - (stay.start_time or seg_start_ts))
+        
+        # Duration: convex combination of original and sampled
+        sampled_dur = sample_stay_duration(act, duration_probs)
+        dur = _blend_duration(orig_dur, sampled_dur, copy_probability)
+        dur = max(60, float(dur))  # keep a minimum 1 minute
+        
+        # Place this stay
+        if t_cursor >= seg_end_ts:
+            break
+        end_ts = min(seg_end_ts, int(t_cursor + dur))
+        synthetic.append(Stay(None, act, int(t_cursor), int(end_ts)))
+        t_cursor = end_ts
+        prev_activity = act
+
+    # If we ended before seg_end_ts, rescale durations to stretch to seg_end_ts
+    if synthetic and t_cursor < seg_end_ts:
+        total = sum(s.end_time - s.start_time for s in synthetic)
+        if total > 0:
+            scale = (seg_end_ts - synthetic[0].start_time) / total
+            t = synthetic[0].start_time
+            for s in synthetic:
+                new_len = int((s.end_time - s.start_time) * scale)
+                s.start_time = t
+                s.end_time = min(seg_end_ts, t + max(60, new_len))
+                s.duration = s.end_time - s.start_time
+                t = s.end_time
+            # ensure exact end
+            if synthetic[-1].end_time != seg_end_ts:
+                synthetic[-1].end_time = seg_end_ts
+                synthetic[-1].duration = synthetic[-1].end_time - synthetic[-1].start_time
+    return synthetic
+
+def save_timeline_to_text(original_stays, synthetic_stays, user_id, day, control_level, output_dir):
+    """Save timeline comparison to text file for debugging."""
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    filename = os.path.join(output_dir, f"user_{user_id}_day_{day}_control_{control_level}.txt")
+    
+    with open(filename, 'w') as f:
+        f.write(f"Timeline Comparison for User {user_id}, Day {day}, Control Level {control_level}\n")
+        f.write("=" * 80 + "\n\n")
+        
+        f.write("ORIGINAL TIMELINE:\n")
+        f.write("-" * 40 + "\n")
+        for i, stay in enumerate(original_stays):
+            f.write(f"{i+1:2d}. {stay.activity_label:12s} | {datetime.fromtimestamp(stay.start_time, tz).strftime('%H:%M')} - {datetime.fromtimestamp(stay.end_time, tz).strftime('%H:%M')} | Duration: {stay.duration//60:3d}min\n")
+        
+        f.write("\nSYNTHETIC TIMELINE:\n")
+        f.write("-" * 40 + "\n")
+        for i, stay in enumerate(synthetic_stays):
+            f.write(f"{i+1:2d}. {stay.activity_label:12s} | {datetime.fromtimestamp(stay.start_time, tz).strftime('%H:%M')} - {datetime.fromtimestamp(stay.end_time, tz).strftime('%H:%M')} | Duration: {stay.duration//60:3d}min\n")
+        
+        f.write("\n" + "=" * 80 + "\n")
+        f.write(f"Control Level: {control_level} (Copy Probability: {1-control_level:.2f})\n")
+        f.write(f"Original stays: {len(original_stays)}, Synthetic stays: {len(synthetic_stays)}\n")
+        f.write(f"Generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+
 def generate_synthetic_day(anchor_stay, duration_probs, transition_probs, trip_duration_probs,
-                         before_anchor=True, after_anchor=True, control_level=CONTROL_LEVEL):
-    """Generate a synthetic day of stays around an anchor stay."""
-    stays = []
-    
-    # Convert anchor stay times to datetime for easier manipulation
-    anchor_start = datetime.fromtimestamp(anchor_stay.start_time, tz)
-    anchor_end = datetime.fromtimestamp(anchor_stay.end_time, tz)
-    
-    # Handle anchor stay modifications
+                           original_day_stays,
+                           control_level=CONTROL_LEVEL):
+    """Generate a synthetic day around anchor using colleague suggestions.
+    - copy_probability = 1 - control_level
+    - Before anchor: follow original sequence up to anchor, align exactly at anchor start
+    - After anchor: follow original sequence after anchor, align exactly at midnight
+    """
+    copy_probability = 1.0 - control_level
+    # Anchor times (may be jittered and/or re-sampled for duration)
+    anchor_start_dt = datetime.fromtimestamp(anchor_stay.start_time, tz)
+    anchor_end_dt = datetime.fromtimestamp(anchor_stay.end_time, tz)
+    day_start_dt = anchor_start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end_dt = day_start_dt + timedelta(days=1)
+
+    # Optionally adjust anchor duration and start-time jitter
     anchor_duration = anchor_stay.duration
     if SAMPLE_ANCHOR_DURATION:
         anchor_duration = sample_stay_duration(anchor_stay.activity_label, duration_probs)
-        anchor_end = anchor_start + timedelta(seconds=anchor_duration)
-    
+        anchor_end_dt = anchor_start_dt + timedelta(seconds=anchor_duration)
     if ANCHOR_JITTER_START_TIME:
-        # Apply control_level to jitter amount
-        # Higher control_level = less jitter (more like original)
-        # Lower control_level = more jitter (more random)
         jitter_amount = ANCHOR_JITTER_AMOUNT * (1 - control_level)
-        
-        # Ensure jittered start time doesn't go below day start
-        day_start = anchor_start.replace(hour=0, minute=0, second=0, microsecond=0)
-        min_start_time = day_start.timestamp()
-        
-        jittered_start = safe_jitter_time(anchor_start.timestamp(), jitter_amount, 
-                                         min_time=min_start_time)
-        anchor_start = datetime.fromtimestamp(jittered_start, tz)
-        anchor_end = anchor_start + timedelta(seconds=anchor_duration)
-    
-    # Set day boundaries (midnight to midnight)
-    day_start = anchor_start.replace(hour=0, minute=0, second=0, microsecond=0)
-    day_end = day_start + timedelta(days=1)
-    
-    if before_anchor:
-        # Generate stays before anchor
-        current_time = anchor_start
-        current_activity = 'home'  # Start from home
-        
-        while current_time > day_start:
-            duration = sample_stay_duration(current_activity, duration_probs)
-            stay_start = max(day_start, current_time - timedelta(seconds=duration))
-            stays.insert(0, Stay(None, current_activity, 
-                               int(stay_start.timestamp()), 
-                               int(current_time.timestamp())))
-            
-            if stay_start == day_start:
-                break
-                
-            # Add trip gap if enabled
-            if ADD_TRIP_GAPS and len(stays) > 1:
-                trip_duration = sample_trip_duration(trip_duration_probs)
-                if TRIP_GAP_JITTER:
-                    # Ensure trip gap doesn't make time go negative
-                    max_jitter = min(trip_duration * 0.2, stay_start.timestamp() - day_start.timestamp())
-                    trip_duration = safe_jitter_time(trip_duration, max_jitter, min_time=0)
-                current_time = stay_start - timedelta(seconds=trip_duration)
-            else:
-                current_time = stay_start
-            
-            current_activity = sample_next_activity(current_activity, transition_probs)
-    
-    # Add anchor stay
-    stays.append(Stay(None, anchor_stay.activity_label, 
-                     int(anchor_start.timestamp()), 
-                     int(anchor_end.timestamp())))
-    
-    if after_anchor:
-        # Generate stays after anchor
-        current_time = anchor_end
-        current_activity = sample_next_activity(anchor_stay.activity_label, transition_probs)
-        
-        while current_time < day_end:
-            duration = sample_stay_duration(current_activity, duration_probs)
-            stay_end = min(day_end, current_time + timedelta(seconds=duration))
-            stays.append(Stay(None, current_activity, 
-                            int(current_time.timestamp()), 
-                            int(stay_end.timestamp())))
-            
-            if stay_end == day_end:
-                break
-                
-            # Add trip gap if enabled
-            if ADD_TRIP_GAPS:
-                trip_duration = sample_trip_duration(trip_duration_probs)
-                if TRIP_GAP_JITTER:
-                    # Ensure trip gap doesn't exceed day end
-                    max_jitter = min(trip_duration * 0.2, day_end.timestamp() - stay_end.timestamp())
-                    trip_duration = safe_jitter_time(trip_duration, max_jitter, min_time=0)
-                current_time = stay_end + timedelta(seconds=trip_duration)
-            else:
-                current_time = stay_end
-            
-            current_activity = sample_next_activity(current_activity, transition_probs)
-    
-    return stays
+        jittered_start = safe_jitter_time(anchor_start_dt.timestamp(), jitter_amount, min_time=day_start_dt.timestamp())
+        anchor_start_dt = datetime.fromtimestamp(jittered_start, tz)
+        anchor_end_dt = anchor_start_dt + timedelta(seconds=anchor_duration)
+
+    # Split original stays into before/after anchor
+    before_segment = [s for s in original_day_stays if s.end_time is not None and s.end_time <= int(anchor_start_dt.timestamp())]
+    after_segment = [s for s in original_day_stays if s.start_time is not None and s.start_time >= int(anchor_end_dt.timestamp())]
+
+    # Build segments with alignment constraints
+    before = _build_segment_from_original(
+        before_segment,
+        int(day_start_dt.timestamp()),
+        int(anchor_start_dt.timestamp()),
+        duration_probs,
+        transition_probs,
+        copy_probability,
+    )
+
+    # Anchor (kept as-is at computed times)
+    anchor_synth = Stay(None, anchor_stay.activity_label, int(anchor_start_dt.timestamp()), int(anchor_end_dt.timestamp()))
+
+    after = _build_segment_from_original(
+        after_segment,
+        int(anchor_end_dt.timestamp()),
+        int(day_end_dt.timestamp()),
+        duration_probs,
+        transition_probs,
+        copy_probability,
+    )
+
+    return before + [anchor_synth] + after
 
 def find_anchor_stay_for_day(stays):
     """Find the longest non-home stay for a given day."""
@@ -740,7 +793,8 @@ def get_original_user_ids():
                     try:
                         imn = json.loads(line)
                         if 'uid' in imn:
-                            original_user_ids.add(imn['uid'])
+                            # Convert to int to match test data format
+                            original_user_ids.add(int(imn['uid']))
                     except json.JSONDecodeError:
                         continue
     except Exception as e:
@@ -871,20 +925,19 @@ def test_control_levels(user_id=650, test_levels=[0.0, 0.25, 0.5, 0.75, 1.0]):
     imns = imn_loading.read_imn('data/test_milano_imns.json.gz')
     poi_data = read_poi_data('data/test_milano_imns_pois.json.gz')
     
-    # Convert user_id to string for comparison
-    user_id_str = str(user_id)
-    if user_id_str not in imns or user_id_str not in poi_data:
+    # Use user_id directly (it's already an int)
+    if user_id not in imns or str(user_id) not in poi_data:
         print(f"User {user_id} not found in data")
         return
     
     # Check if user is from original dataset
-    if user_id_str not in original_user_ids:
+    if user_id not in original_user_ids:
         print(f"User {user_id} is not from the original Milano dataset")
         return
     
     # Get user data
-    imn = imns[user_id_str]
-    enriched = enrich_imn_with_poi(imn, poi_data[user_id_str])
+    imn = imns[user_id]
+    enriched = enrich_imn_with_poi(imn, poi_data[str(user_id)])
     stays = extract_stays_from_trips(enriched['trips'], enriched['locations'])
     stays_by_day = extract_stays_by_day(stays)
     
@@ -895,8 +948,16 @@ def test_control_levels(user_id=650, test_levels=[0.0, 0.25, 0.5, 0.75, 1.0]):
     # Collect global statistics
     global_duration_dist, global_transition_dist, global_trip_dist = collect_global_statistics(filtered_imns, filtered_poi_data)
     
+    # Debug: print what we got
+    print(f"Global duration dist: {type(global_duration_dist)}, keys: {list(global_duration_dist.keys()) if isinstance(global_duration_dist, dict) else 'not a dict'}")
+    print(f"Global transition dist: {type(global_transition_dist)}, keys: {list(global_transition_dist.keys()) if isinstance(global_transition_dist, dict) else 'not a dict'}")
+    
     # Build user-specific distributions
     user_duration_probs, user_transition_probs, user_trip_duration_probs = build_stay_distributions(stays_by_day)
+    
+    # Debug: print user distributions
+    print(f"User duration probs: {type(user_duration_probs)}, keys: {list(user_duration_probs.keys()) if isinstance(user_duration_probs, dict) else 'not a dict'}")
+    print(f"User transition probs: {type(user_transition_probs)}, keys: {list(user_transition_probs.keys()) if isinstance(user_transition_probs, dict) else 'not a dict'}")
     
     # Create comparison plot
     fig, axes = plt.subplots(len(test_levels) + 1, 1, figsize=(16, 3 * (len(test_levels) + 1)), sharex=True)
@@ -927,14 +988,29 @@ def test_control_levels(user_id=650, test_levels=[0.0, 0.25, 0.5, 0.75, 1.0]):
     for i, control_level in enumerate(test_levels):
         ax = axes[i + 1]
         
-        # Interpolate distributions
-        duration_probs = interpolate_distributions(user_duration_probs, global_duration_dist, control_level)
-        transition_probs = interpolate_distributions(user_transition_probs, global_transition_dist, control_level)
-        trip_duration_probs = interpolate_distributions(user_trip_duration_probs, global_trip_dist, control_level)
+        # Interpolate distributions (handle empty global distributions)
+        if not global_duration_dist or not global_transition_dist:
+            print("Warning: Global distributions are empty, using user-specific distributions only")
+            duration_probs = user_duration_probs
+            transition_probs = user_transition_probs
+            trip_duration_probs = user_trip_duration_probs
+        else:
+            duration_probs = interpolate_distributions(user_duration_probs, global_duration_dist, control_level)
+            transition_probs = interpolate_distributions(user_transition_probs, global_transition_dist, control_level)
+            trip_duration_probs = interpolate_distributions(user_trip_duration_probs, global_trip_dist, control_level)
         
         # Generate synthetic day
-        synthetic_stays = generate_synthetic_day(test_anchor, duration_probs, transition_probs, trip_duration_probs, 
-                                               control_level=control_level)
+        synthetic_stays = generate_synthetic_day(
+            test_anchor,
+            duration_probs,
+            transition_probs,
+            trip_duration_probs,
+            stays_by_day[test_day],
+            control_level=control_level,
+        )
+        
+        # Save timeline comparison to text file
+        save_timeline_to_text(stays_by_day[test_day], synthetic_stays, user_id, test_day, control_level, "timeline_text_outputs")
         
         # Plot synthetic stays
         plot_stays(synthetic_stays, y_offset=0.5, ax=ax)
@@ -1070,8 +1146,17 @@ def main():
                         trip_duration_probs = user_trip_duration_probs
                     
                     # Generate synthetic day with current control level
-                    synthetic_stays = generate_synthetic_day(anchor_stay, duration_probs, transition_probs, trip_duration_probs, 
-                                                          control_level=control_level)
+                    synthetic_stays = generate_synthetic_day(
+                        anchor_stay,
+                        duration_probs,
+                        transition_probs,
+                        trip_duration_probs,
+                        day_stays,
+                        control_level=control_level,
+                    )
+                    
+                    # Save timeline comparison to text file
+                    save_timeline_to_text(day_stays, synthetic_stays, uid, day, control_level, "timeline_text_outputs")
                     
                     # Plot synthetic timeline for this control level
                     plot_stays(synthetic_stays, y_offset=y_offset, ax=ax)
