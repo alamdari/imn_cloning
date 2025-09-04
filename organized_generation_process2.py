@@ -44,7 +44,8 @@ ACTIVITY_COLORS = {
     "leisure": "lightgreen",
     "health": "lightcoral",
     "admin": "lightblue",
-    "finance": "gold"
+    "finance": "gold",
+    "trip": "lightgray"
 }
 
 # POI to activity mapping
@@ -122,7 +123,8 @@ def enrich_imn_with_poi(imn: Dict, poi_info: Dict) -> Dict:
 
 
 def extract_stays_from_trips(trips: List[Tuple], locations: Dict) -> List[Stay]:
-    """Convert trips into stays by considering the destination of each trip as a stay."""
+    """Convert trips into stays by considering the destination of each trip as a stay.
+    Also adds trip activities in gaps between stays."""
     stays = []
     
     # First pass: create stays with start times
@@ -130,18 +132,34 @@ def extract_stays_from_trips(trips: List[Tuple], locations: Dict) -> List[Stay]:
         activity_label = locations[to_id].get('activity_label', 'unknown')
         stays.append(Stay(to_id, activity_label, et, None))
     
-    # Second pass: set end times based on next trip's start time
-    for i in range(len(stays) - 1):
-        next_trip_start = trips[i + 1][2]  # start time of the next trip
-        stays[i].set_end_time(next_trip_start)
+    # Second pass: set end times and add trip activities in gaps
+    all_activities = []
+    for i in range(len(stays)):
+        current_stay = stays[i]
+        
+        # Set end time based on next trip's start time
+        if i < len(stays) - 1:
+            next_trip_start = trips[i + 1][2]  # start time of the next trip
+            current_stay.set_end_time(next_trip_start)
+        else:
+            # Handle the last stay
+            if current_stay.start_time is not None:
+                current_stay.set_end_time(current_stay.start_time + 3600)  # Default 1 hour duration
+        
+        # Add the stay activity
+        all_activities.append(current_stay)
+        
+        # Add trip activity if there's a gap before the next stay
+        if i < len(stays) - 1 and current_stay.end_time is not None:
+            next_stay = stays[i + 1]
+            if next_stay.start_time is not None and next_stay.start_time > current_stay.end_time:
+                # Create trip activity to fill the gap
+                trip_duration = next_stay.start_time - current_stay.end_time
+                if trip_duration > 0:  # Only add if there's actually a gap
+                    trip_stay = Stay(-1, "trip", current_stay.end_time, next_stay.start_time)
+                    all_activities.append(trip_stay)
     
-    # Handle the last stay
-    if stays:
-        last_stay = stays[-1]
-        if last_stay.start_time is not None:
-            last_stay.set_end_time(last_stay.start_time + 3600)  # Default 1 hour duration
-    
-    return stays
+    return all_activities
 
 
 def extract_stays_by_day(stays: List[Stay], tz) -> Dict[datetime.date, List[Stay]]:
@@ -585,6 +603,7 @@ def generate_synthetic_day(original_stays: List[Stay], duration_probs: Dict,
             hist, bins = duration_probs[act]
             sampled_dur = sample_from_hist(hist, bins)
         else:
+            # Fallback for activities not in distributions (like "trip")
             sampled_dur = orig_dur
         dur = int((1 - randomness) * orig_dur + randomness * sampled_dur)
 
@@ -626,6 +645,7 @@ def generate_synthetic_day(original_stays: List[Stay], duration_probs: Dict,
             hist, bins = duration_probs[act]
             sampled_dur = sample_from_hist(hist, bins)
         else:
+            # Fallback for activities not in distributions (like "trip")
             sampled_dur = orig_dur
         dur = int((1 - randomness) * orig_dur + randomness * sampled_dur)
 
