@@ -38,8 +38,7 @@ ACTIVITY_COLORS = {
     "leisure": "lightgreen",
     "health": "lightcoral",
     "admin": "lightblue",
-    "finance": "gold",
-    "trip": "lightgray"
+    "finance": "gold"
 }
 
 # POI to activity mapping
@@ -118,7 +117,7 @@ def enrich_imn_with_poi(imn: Dict, poi_info: Dict) -> Dict:
 
 def extract_stays_from_trips(trips: List[Tuple], locations: Dict) -> List[Stay]:
     """Convert trips into stays by considering the destination of each trip as a stay.
-    Also adds trip activities in gaps between stays."""
+    Gaps are later handled by day-stretching; we do not create a 'trip' activity."""
     stays = []
     
     # First pass: create stays with start times
@@ -126,7 +125,7 @@ def extract_stays_from_trips(trips: List[Tuple], locations: Dict) -> List[Stay]:
         activity_label = locations[to_id].get('activity_label', 'unknown')
         stays.append(Stay(to_id, activity_label, et, None))
     
-    # Second pass: set end times and add trip activities in gaps
+    # Second pass: set end times only; gaps will be handled by stretching
     all_activities = []
     for i in range(len(stays)):
         current_stay = stays[i]
@@ -142,16 +141,6 @@ def extract_stays_from_trips(trips: List[Tuple], locations: Dict) -> List[Stay]:
         
         # Add the stay activity
         all_activities.append(current_stay)
-        
-        # Add trip activity if there's a gap before the next stay
-        if i < len(stays) - 1 and current_stay.end_time is not None:
-            next_stay = stays[i + 1]
-            if next_stay.start_time is not None and next_stay.start_time > current_stay.end_time:
-                # Create trip activity to fill the gap
-                trip_duration = next_stay.start_time - current_stay.end_time
-                if trip_duration > 0:  # Only add if there's actually a gap
-                    trip_stay = Stay(-1, "trip", current_stay.end_time, next_stay.start_time)
-                    all_activities.append(trip_stay)
     
     return all_activities
 
@@ -190,6 +179,79 @@ def extract_stays_by_day(stays: List[Stay], tz) -> Dict[datetime.date, List[Stay
             end_of_day = current_dt + timedelta(days=1)
     
     return stays_by_day
+
+
+def _stretch_day_stays_to_full_coverage(day_stays: List[Stay], tz) -> List[Stay]:
+    """Stretch a single day's stays so they exactly cover the whole day without gaps.
+
+    Rules:
+    - Snap first stay start to midnight
+    - Between consecutive stays, set previous end to next start (remove gaps/overlaps)
+    - Snap last stay end to next midnight
+    """
+    if not day_stays:
+        return []
+
+    # Determine day bounds from first stay
+    first_dt = datetime.fromtimestamp(day_stays[0].start_time, tz)
+    midnight_dt = first_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start = int(midnight_dt.timestamp())
+    day_end = int((midnight_dt + timedelta(days=1)).timestamp())
+
+    # Sort by start time
+    sorted_stays = sorted(day_stays, key=lambda s: (s.start_time or 0, s.end_time or 0))
+
+    # Clone to avoid mutating original objects unintentionally
+    stretched: List[Stay] = []
+    for s in sorted_stays:
+        stretched.append(Stay(s.location_id, s.activity_label, s.start_time, s.end_time))
+
+    # Snap first start to midnight
+    if stretched[0].start_time is None:
+        stretched[0].start_time = day_start
+    else:
+        stretched[0].start_time = min(max(stretched[0].start_time, day_start), day_end)
+
+    # Ensure continuity between stays (fill gaps, trim overlaps)
+    for i in range(len(stretched) - 1):
+        current = stretched[i]
+        nxt = stretched[i + 1]
+
+        # Normalize None times
+        if current.end_time is None:
+            current.end_time = current.start_time
+        if nxt.start_time is None:
+            nxt.start_time = current.end_time
+
+        # Force continuity: current ends exactly at next start
+        nxt.start_time = max(min(nxt.start_time, day_end), day_start)
+        current.end_time = max(min(nxt.start_time, day_end), day_start)
+
+        # Update duration
+        current.duration = max(0, current.end_time - current.start_time)
+
+    # Snap last end to day_end
+    last = stretched[-1]
+    if last.end_time is None:
+        last.end_time = day_end
+    else:
+        last.end_time = min(max(last.end_time, day_start), day_end)
+    last.end_time = day_end
+    last.duration = max(0, last.end_time - last.start_time)
+
+    # Ensure first start is day_start after adjustments
+    stretched[0].start_time = day_start
+    stretched[0].duration = max(0, (stretched[0].end_time or day_start) - stretched[0].start_time)
+
+    return stretched
+
+
+def stretch_all_days(stays_by_day: Dict[datetime.date, List[Stay]], tz) -> Dict[datetime.date, List[Stay]]:
+    """Apply stretching to every day's stays to eliminate gaps and cover full day."""
+    stretched_by_day: Dict[datetime.date, List[Stay]] = {}
+    for day, day_stays in stays_by_day.items():
+        stretched_by_day[day] = _stretch_day_stays_to_full_coverage(day_stays, tz)
+    return stretched_by_day
 
 
 def build_stay_distributions(stays_by_day: Dict[datetime.date, List[Stay]]) -> Tuple[Dict, Dict, Any]:
@@ -349,12 +411,36 @@ def generate_synthetic_day(original_stays: List[Stay], duration_probs: Dict,
 
     anchor_rel_start = int(anchor_stay.start_time - day_start)
     anchor_rel_end = int(anchor_stay.end_time - day_start)
+    anchor_orig_dur = max(1, anchor_rel_end - anchor_rel_start)
+
+    # Perturb anchor start and duration within +/- 0.25 * randomness * original_duration
+    max_shift = int(0.25 * randomness * anchor_orig_dur)
+    if max_shift > 0:
+        delta_start = int(np.random.uniform(-max_shift, max_shift))
+        delta_dur = int(np.random.uniform(-max_shift, max_shift))
+    else:
+        delta_start = 0
+        delta_dur = 0
+
+    pert_start = anchor_rel_start + delta_start
+    pert_start = max(0, min(pert_start, day_length))
+    pert_dur = max(1, anchor_orig_dur + delta_dur)
+    # If anchor is the first activity of the day, do not allow any leading gap
+    is_anchor_first = False
+    if rel_stays and rel_stays[0][0] is anchor_stay:
+        is_anchor_first = True
+        pert_start = 0
+
+    pert_end = pert_start + pert_dur
+    if pert_end > day_length:
+        pert_end = day_length
+        pert_dur = max(1, pert_end - pert_start)
 
     synthetic_stays = []
     current_time = 0
     prev_activity = "home"  # always force first stay to begin at home
 
-    # Generate before anchor
+    # Generate before anchor (respect perturbed anchor start)
     for (s, rel_start, rel_end) in rel_stays:
         if s is anchor_stay:
             break
@@ -377,21 +463,21 @@ def generate_synthetic_day(original_stays: List[Stay], duration_probs: Dict,
             hist, bins = duration_probs[act]
             sampled_dur = sample_from_hist(hist, bins)
         else:
-            # Fallback for activities not in distributions (like "trip")
+            # Fallback for activities not in distributions
             sampled_dur = orig_dur
         dur = int((1 - randomness) * orig_dur + randomness * sampled_dur)
 
-        end_time = min(current_time + dur, anchor_rel_start)
+        end_time = min(current_time + dur, pert_start)
         if end_time > current_time:  # avoid zero/negative durations
             synthetic_stays.append((act, current_time, end_time))
             prev_activity = act
         current_time = end_time
-        if current_time >= anchor_rel_start:
+        if current_time >= pert_start:
             break
 
     # Insert anchor unchanged
-    synthetic_stays.append((anchor_stay.activity_label, anchor_rel_start, anchor_rel_end))
-    current_time = anchor_rel_end
+    synthetic_stays.append((anchor_stay.activity_label, pert_start, pert_end))
+    current_time = pert_end
     prev_activity = anchor_stay.activity_label
 
     # Generate after anchor
@@ -419,7 +505,7 @@ def generate_synthetic_day(original_stays: List[Stay], duration_probs: Dict,
             hist, bins = duration_probs[act]
             sampled_dur = sample_from_hist(hist, bins)
         else:
-            # Fallback for activities not in distributions (like "trip")
+            # Fallback for activities not in distributions
             sampled_dur = orig_dur
         dur = int((1 - randomness) * orig_dur + randomness * sampled_dur)
 
@@ -431,11 +517,73 @@ def generate_synthetic_day(original_stays: List[Stay], duration_probs: Dict,
         if current_time >= day_length:
             break
 
-    # Fix last stay to midnight
-    if synthetic_stays:
-        act, start, _ = synthetic_stays[-1]
-        synthetic_stays[-1] = (act, start, day_length)
+    # Anchor-aware stretching: do not change anchor; extend pre-anchor last stay to
+    # anchor start if needed; extend final non-anchor stay to day end.
+    def _stretch_anchor_aware(
+        stays_rel: List[Tuple[str, int, int]],
+        anchor_tuple: Tuple[str, int, int],
+        total_len: int
+    ) -> List[Tuple[str, int, int]]:
+        if not stays_rel:
+            return []
+        # Sort by start time
+        ordered = sorted(stays_rel, key=lambda x: x[1])
 
+        # Identify anchor index if present exactly
+        anchor_idx = None
+        for i, t in enumerate(ordered):
+            if t == anchor_tuple:
+                anchor_idx = i
+                break
+
+        # Ensure the first stay starts at 0 if it's not the anchor
+        out: List[Tuple[str, int, int]] = []
+        act0, s0, e0 = ordered[0]
+        if anchor_idx == 0:
+            # Keep anchor unchanged; do not force start to 0
+            out.append((act0, s0, e0))
+        else:
+            s0 = 0
+            e0 = max(0, min(e0, total_len))
+            if e0 < s0:
+                e0 = s0
+            out.append((act0, s0, e0))
+
+        # Iterate and enforce continuity, preserving anchor start
+        for i in range(1, len(ordered)):
+            act, st, et = ordered[i]
+            st = max(0, min(st, total_len))
+            et = max(0, min(et, total_len))
+            prev_act, prev_st, prev_et = out[-1]
+
+            if anchor_idx is not None and i == anchor_idx:
+                # Do not move anchor start; stretch previous end to anchor start if gap
+                st_fixed = st
+                prev_et = min(max(st_fixed, 0), total_len)
+                out[-1] = (prev_act, prev_st, prev_et)
+                if et < st_fixed:
+                    et = st_fixed
+                out.append((act, st_fixed, et))
+            else:
+                # Force current start to previous end
+                st = prev_et
+                if et < st:
+                    et = st
+                out.append((act, st, et))
+
+        # Stretch last non-anchor stay to day end
+        last_idx = len(out) - 1
+        if anchor_idx is not None and last_idx == anchor_idx:
+            # Do not stretch if anchor is the last; leave as is
+            pass
+        else:
+            last_act, last_st, _ = out[-1]
+            out[-1] = (last_act, last_st, total_len)
+
+        return out
+
+    anchor_tuple = (anchor_stay.activity_label, pert_start, pert_end)
+    synthetic_stays = _stretch_anchor_aware(synthetic_stays, anchor_tuple, day_length)
     return synthetic_stays
 
 
@@ -558,7 +706,7 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict,
     # Extract stays from trips
     stays = extract_stays_from_trips(enriched['trips'], enriched['locations'])
     
-    # Group stays by day
+    # Group stays by day (keep original, non-stretched for distributions/visualization)
     stays_by_day = extract_stays_by_day(stays, tz)
     
     if not stays_by_day:
@@ -570,7 +718,7 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict,
     
     # Generate probability report
     user_probs_report(user_duration_probs, user_transition_probs, user_trip_duration_probs, 
-                     user_id, os.path.join(results_dir, "user_probability_reports"))
+                     user_id, os.path.join(results_dir, "user_probability_reports3"))
     
     # Prepare day data for visualization
     day_data = prepare_day_data(stays_by_day, user_duration_probs, user_transition_probs, 
@@ -578,7 +726,7 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict,
     
     # Generate timeline visualization
     fig = visualize_day_data(day_data, user_id=user_id)
-    timeline_path = os.path.join(results_dir, "user_timeline_visualizations", f"user_{user_id}_timelines.png")
+    timeline_path = os.path.join(results_dir, "user_timeline_visualizations3", f"user_{user_id}_timelines.png")
     os.makedirs(os.path.dirname(timeline_path), exist_ok=True)
     fig.savefig(timeline_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
@@ -594,12 +742,12 @@ def main():
     # Create results directory structure
     results_dir = "./results"
     os.makedirs(results_dir, exist_ok=True)
-    os.makedirs(os.path.join(results_dir, "user_probability_reports"), exist_ok=True)
-    os.makedirs(os.path.join(results_dir, "user_timeline_visualizations"), exist_ok=True)
+    os.makedirs(os.path.join(results_dir, "user_probability_reports3"), exist_ok=True)
+    os.makedirs(os.path.join(results_dir, "user_timeline_visualizations3"), exist_ok=True)
     
     print(f"Results will be saved to: {results_dir}")
-    print(f"  - User probability reports: {results_dir}/user_probability_reports/")
-    print(f"  - Timeline visualizations: {results_dir}/user_timeline_visualizations/")
+    print(f"  - User probability reports: {results_dir}/user_probability_reports3/")
+    print(f"  - Timeline visualizations: {results_dir}/user_timeline_visualizations3/")
     print()
     
     # Load IMNs and POI data
