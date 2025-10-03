@@ -180,6 +180,7 @@ def select_random_nodes(gdf_cumulative_p, n=10, all_nodes: Optional[List[int]] =
         candidates = find_in_cumulative(gdf_cumulative_p, pr)
         # Fallback if no intersecting nodes in the selected cell
         if candidates is None or len(candidates) == 0:
+            print("   [warn] empty population cell -> fallback to random graph node")
             if all_nodes is not None and len(all_nodes) > 0:
                 node_list.append(all_nodes[np.random.randint(len(all_nodes))])
             else:
@@ -249,6 +250,7 @@ def map_imn_to_osm(imn, target_osm, home_osm=None, work_osm=None, n_trials=10, g
         rmse = np.sqrt(SE / (len(map_loc) * (len(map_loc) - 1) / 2))
     else:
         rmse = 0
+    print(f"Mapping {len(imn['locations'])} IMN locations → {len(map_loc)} OSM nodes, RMSE={rmse:.2f}")
     return map_loc, rmse
 
 
@@ -413,6 +415,13 @@ def ensure_spatial_resources() -> Tuple[nx.MultiDiGraph, pd.DataFrame]:
             pickle.dump(gdf_cumulative_p, f)
         print(" saved")
 
+    # Debug population cell-node linkage stats
+    try:
+        print("Population cell intersecting_nodes counts:")
+        print(gdf_cumulative_p['intersecting_nodes'].apply(len).describe())
+    except Exception as _:
+        pass
+
     return G, gdf_cumulative_p
 
 
@@ -439,7 +448,8 @@ def generate_interactive_map(user_id: int,
                              enriched_imn: Dict,
                              stays_by_day: Dict[datetime.date, List[Stay]],
                              out_html_path: str,
-                             draw_polyline: bool = True) -> None:
+                             draw_polyline: bool = True,
+                             activity_override: Optional[Dict[int, str]] = None) -> None:
     if not trajectory and not map_loc:
         return
 
@@ -476,9 +486,14 @@ def generate_interactive_map(user_id: int,
         node_data = G.nodes[osm_node]
         node_lat = node_data['y']
         node_lon = node_data['x']
-        loc_info = enriched_imn['locations'].get(loc_id, {})
-        activity = loc_info.get('activity_label', 'unknown')
-        freq = loc_info.get('frequency', None)
+        # Resolve activity label: override for synthetic/pseudo IDs if provided
+        if activity_override is not None and loc_id in activity_override:
+            activity = activity_override[loc_id]
+            freq = None
+        else:
+            loc_info = enriched_imn['locations'].get(loc_id, {})
+            activity = loc_info.get('activity_label', 'unknown')
+            freq = loc_info.get('frequency', None)
         stat = loc_stats.get(loc_id, {"visits": 0, "total_duration": 0})
         total_hours = round(stat["total_duration"] / 3600.0, 2) if stat["total_duration"] else 0.0
         popup_html = f"""
@@ -544,6 +559,283 @@ def create_split_map_html(left_title: str, left_src: str, right_title: str, righ
 """
     with open(out_html_path, 'w') as f:
         f.write(html)
+
+
+# ------------------------------
+# Synthetic stays → spatial trips simulation
+# ------------------------------
+
+def simulate_synthetic_trips(
+    imn: Dict,
+    synthetic_stays: List[Tuple[str, int, int]],
+    G: nx.MultiDiGraph,
+    gdf_cumulative_p: pd.DataFrame,
+    randomness: float = 0.5,
+    fixed_home_node: Optional[int] = None,
+    fixed_work_node: Optional[int] = None,
+    precomputed_map_loc_rmse: Optional[Tuple[Dict[int, int], float]] = None,
+) -> Tuple[List[Tuple[float, float, int]], Dict[Any, int], Dict[str, int], float, List[List[Tuple[float, float, int]]]]:
+    """Simulate spatial trips for one day based on synthetic stays.
+
+    - synthetic_stays: list of (activity_label, start_rel, end_rel) in seconds from midnight
+    Returns (trajectory, osm_segments_usage, activity_to_node, rmse)
+    """
+    if not synthetic_stays:
+        return None, None, None, None, None
+
+    # Establish fixed home/work mapping once
+    if precomputed_map_loc_rmse is not None:
+        map_loc_imn, rmse = precomputed_map_loc_rmse
+        print("    [synthetic] using precomputed IMN→OSM mapping for home/work")
+    else:
+        print("    [synthetic] mapping IMN home/work to OSM...")
+        map_loc_imn, rmse = map_imn_to_osm(imn, G, gdf_cumulative_p=gdf_cumulative_p)
+
+    # Choose home/work nodes: prefer fixed if provided
+    home_node = fixed_home_node if fixed_home_node is not None else map_loc_imn.get(imn['home'])
+    work_node = fixed_work_node if fixed_work_node is not None else map_loc_imn.get(imn['work'])
+    all_nodes = list(G.nodes())
+
+    # Per-stay mapping: assign one OSM node per stay instance
+    stay_nodes: List[int] = []
+    unique_acts = [ act for (act, _, _) in synthetic_stays ]
+    print(f"    [synthetic] activities in day (ordered): {unique_acts}")
+    for idx, (act, st, et) in enumerate(synthetic_stays):
+        # Debug type and normalize label
+        print(f"    [synthetic][debug] activity label type: {act} ({type(act)})")
+        act_label = str(act).lower() if act is not None else "unknown"
+        if act_label == 'home' and home_node is not None:
+            stay_nodes.append(home_node)
+        elif act_label == 'work' and work_node is not None:
+            stay_nodes.append(work_node)
+        else:
+            sampled = select_random_nodes(gdf_cumulative_p, n=1, all_nodes=all_nodes)
+            if not sampled:
+                print("    [synthetic][warn] no sampled node; using random graph node")
+                stay_nodes.append(all_nodes[np.random.randint(len(all_nodes))])
+            else:
+                stay_nodes.append(sampled[0])
+
+    # First location override: only enforce home if the first activity is home
+    first_label = str(synthetic_stays[0][0]).lower() if synthetic_stays and synthetic_stays[0][0] is not None else ""
+    if len(stay_nodes) > 0 and first_label == 'home' and home_node is not None:
+        stay_nodes[0] = home_node
+    print(f"    [synthetic] per-stay nodes: {stay_nodes}")
+    try:
+        distinct_nodes = len(set(stay_nodes))
+        coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in stay_nodes]
+        print(f"    [synthetic] distinct nodes: {distinct_nodes}")
+    except Exception:
+        pass
+
+    # Identify anchor (longest non-home stay)
+    anchor_idx = None
+    max_dur = -1
+    for idx, (act, st, et) in enumerate(synthetic_stays):
+        if act == 'home':
+            continue
+        dur = max(0, (et or 0) - (st or 0))
+        if dur > max_dur:
+            max_dur = dur
+            anchor_idx = idx
+
+    # Make mutable copy to adjust times
+    stays_mut = [ [act, int(st), int(et)] for (act, st, et) in synthetic_stays ]
+
+    # Build trips and adjust for travel durations
+    trajectory: List[Tuple[float, float, int]] = []
+    osm_segments_usage: Dict[Any, int] = {}
+    legs_coords: List[List[Tuple[float, float, int]]] = []
+
+    print(f"    [synthetic] synthetic stays: {len(stays_mut)} → expected trips: {len(stays_mut)-1}")
+    leg_success = 0
+    leg_fail = 0
+    for i in range(len(stays_mut) - 1):
+        act_from, st_from, et_from = stays_mut[i]
+        act_to, st_to, et_to = stays_mut[i + 1]
+
+        origin_node = stay_nodes[i]
+        dest_node = stay_nodes[i + 1]
+
+        # Allocated gap (trip window)
+        allocated_gap = max(0, st_to - et_from)
+
+        # If trip is shorter than gap, start later to arrive exactly at next start
+        trip_start_time = et_from
+        shortest_p, duration_p, osm_segments = create_trajectory(G, origin_node, dest_node, trip_start_time, use_cache=True)
+        if shortest_p is None:
+            y1, x1 = G.nodes[origin_node]['y'], G.nodes[origin_node]['x']
+            y2, x2 = G.nodes[dest_node]['y'], G.nodes[dest_node]['x']
+            print(f"    [synthetic][warn] no route {origin_node}->{dest_node} ({y1:.5f},{x1:.5f} -> {y2:.5f},{x2:.5f}); skipping")
+            leg_fail += 1
+            continue
+
+        if duration_p > allocated_gap:
+            # Need more time than allocated
+            delta = int(duration_p - allocated_gap)
+            if i == anchor_idx:
+                # Previous is anchor → cannot shift it earlier; shift next start later
+                stays_mut[i + 1][1] += delta  # shift next start
+            elif i + 1 == anchor_idx:
+                # Next is anchor → shift previous end earlier
+                stays_mut[i][2] = max(st_from, et_from - delta)
+                trip_start_time = stays_mut[i][2]
+            else:
+                # Shift previous end earlier in general case
+                stays_mut[i][2] = max(st_from, et_from - delta)
+                trip_start_time = stays_mut[i][2]
+            # Recompute route at adjusted start
+            shortest_p, duration_p, osm_segments = create_trajectory(G, origin_node, dest_node, trip_start_time, use_cache=True)
+            if shortest_p is None:
+                print(f"    [synthetic][warn] no route after adjust {origin_node}->{dest_node}; skipping")
+                leg_fail += 1
+                continue
+        else:
+            # duration shorter than allocated gap: delay start so arrival matches next start
+            slack = int(allocated_gap - duration_p)
+            trip_start_time = et_from + slack
+            # extend previous stay to the delayed start
+            stays_mut[i][2] = trip_start_time
+            # recompute route at delayed start to preserve timing
+            shortest_p, duration_p, osm_segments = create_trajectory(G, origin_node, dest_node, trip_start_time, use_cache=True)
+            if shortest_p is None:
+                print(f"    [synthetic][warn] no route with slack {origin_node}->{dest_node}; skipping")
+                leg_fail += 1
+                continue
+
+        # Append trajectory points (whole trajectory and per-leg)
+        trajectory.extend(shortest_p)
+        legs_coords.append(shortest_p)
+        # Update usage
+        for oss in osm_segments:
+            osm_segments_usage[oss] = osm_segments_usage.get(oss, 0) + 1
+        leg_success += 1
+
+    print(f"    [synthetic] legs success={leg_success}, fail={leg_fail}")
+    print(f"    [synthetic] built {len(trajectory)} points across {len(osm_segments_usage)} segments")
+    # For mapping on the Porto map: convert per-stay mapping to a label-index map
+    pseudo_map = { i: node for i, node in enumerate(stay_nodes) }
+    return trajectory, osm_segments_usage, pseudo_map, rmse, legs_coords
+
+
+# ------------------------------
+# Multi-day Porto map with per-day layers and combined layer
+# ------------------------------
+
+def generate_interactive_porto_map_multi(
+    user_id: int,
+    per_day_data: Dict[datetime.date, Dict[str, Any]],
+    G: nx.MultiDiGraph,
+    out_html_path: str
+) -> None:
+    # per_day_data[day] = { 'trajectory': List[(lat,lon,t)], 'pseudo_map_loc': Dict[idx->node], 'synthetic_stays': List[(act,s,e)] }
+    if not per_day_data:
+        return
+
+    # Determine center from first available trajectory
+    first_day = next(iter(per_day_data.keys()))
+    first_traj = per_day_data[first_day]['trajectory']
+    if first_traj:
+        mid_idx = len(first_traj) // 2
+        center_lat, center_lon = first_traj[mid_idx][0], first_traj[mid_idx][1]
+    else:
+        # fallback: any node from first day
+        any_node = next(iter(per_day_data[first_day]['pseudo_map_loc'].values()))
+        center_lat, center_lon = G.nodes[any_node]['y'], G.nodes[any_node]['x']
+
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=13, tiles=None)
+    folium.TileLayer('OpenStreetMap', opacity=0.6, control=False).add_to(m)
+
+    # Combined layer
+    combined = folium.FeatureGroup(name="All Days Combined", show=False)
+    combined_coords: List[Tuple[float, float]] = []
+
+    # Static layer for unique home/work markers across all days
+    static_hw = folium.FeatureGroup(name="Home/Work", show=True)
+    added_hw_nodes = set()
+
+    # Per-day layers
+    for day, content in per_day_data.items():
+        day_label = str(day)
+        fg = folium.FeatureGroup(name=f"Day {day_label}", show=True)
+
+        # Progressive blue per leg: from 1.0 down to ~0.45
+        legs_coords: List[List[Tuple[float, float, int]]] = content.get('legs_coords', [])
+        if legs_coords:
+            n_legs = len(legs_coords)
+            if n_legs > 0:
+                for i, leg in enumerate(legs_coords):
+                    coords = [(lat, lon) for lat, lon, _ in leg]
+                    # opacity from 1.0 to 0.45 across legs
+                    if n_legs == 1:
+                        opacity = 1.0
+                    else:
+                        opacity = max(0.45, 1.0 - (i * (1.0 - 0.45) / (n_legs - 1)))
+                    folium.PolyLine(coords, color="#1f77b4", weight=3, opacity=opacity, tooltip=f"Trip {i+1} - {day_label}").add_to(fg)
+                    combined_coords.extend(coords)
+        else:
+            traj = content['trajectory']
+            if traj:
+                coords = [(lat, lon) for lat, lon, _ in traj]
+                folium.PolyLine(coords, color="#1f77b4", weight=3, opacity=0.9, tooltip=f"Trajectory {day_label}").add_to(fg)
+                combined_coords.extend(coords)
+
+        pseudo_map_loc = content['pseudo_map_loc']
+        synthetic_stays = content['synthetic_stays']
+        for idx, node in pseudo_map_loc.items():
+            if node not in G.nodes:
+                continue
+            node_lat = G.nodes[node]['y']
+            node_lon = G.nodes[node]['x']
+            act = str(synthetic_stays[idx][0]).lower() if idx < len(synthetic_stays) else 'unknown'
+            marker_color = ACTIVITY_COLORS.get(act, "black")
+            popup_html = f"""
+            <div style='font-size:12px;'>
+                <b>User:</b> {user_id}<br/>
+                <b>Day:</b> {day_label}<br/>
+                <b>Stay index:</b> {idx}<br/>
+                <b>Activity:</b> {act}<br/>
+                <b>OSM node:</b> {node}
+            </div>
+            """
+            # Add home/work once in static layer; others per-day layer
+            if act in ("home", "work"):
+                if node not in added_hw_nodes:
+                    folium.CircleMarker(
+                        [node_lat, node_lon],
+                        radius=7,
+                        color=marker_color,
+                        fill=True,
+                        fill_color=marker_color,
+                        fill_opacity=0.95,
+                        weight=2,
+                        popup=folium.Popup(popup_html, max_width=300),
+                        tooltip=f"{act}"
+                    ).add_to(static_hw)
+                    added_hw_nodes.add(node)
+            else:
+                folium.CircleMarker(
+                    [node_lat, node_lon],
+                    radius=6,
+                    color=marker_color,
+                    fill=True,
+                    fill_color=marker_color,
+                    fill_opacity=0.9,
+                    weight=2,
+                    popup=folium.Popup(popup_html, max_width=300),
+                    tooltip=f"{act}"
+                ).add_to(fg)
+
+        fg.add_to(m)
+
+    if combined_coords:
+        folium.PolyLine(combined_coords, color="#2ca02c", weight=2, opacity=0.7, tooltip="All Days Combined").add_to(combined)
+    combined.add_to(m)
+    static_hw.add_to(m)
+
+    folium.LayerControl(collapsed=False).add_to(m)
+    os.makedirs(os.path.dirname(out_html_path), exist_ok=True)
+    m.save(out_html_path)
 
 # ------------------------------
 # IO / CONFIG
@@ -1237,6 +1529,20 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict,
     # Prepare day data for visualization
     day_data = prepare_day_data(stays_by_day, user_duration_probs, user_transition_probs, 
                                randomness_levels, tz)
+    # DEBUG: how many synthetic days and stays per day
+    try:
+        print(f"[DEBUG] User {user_id} synthetic timeline days: {len(day_data)}")
+        dbg_r = 0.5 if 0.5 in randomness_levels else (randomness_levels[0] if randomness_levels else None)
+        for d, ddata in day_data.items():
+            if dbg_r is not None and dbg_r in ddata['synthetic']:
+                print(f"   - Day {d}: {len(ddata['synthetic'][dbg_r])} stays @ randomness={dbg_r}")
+            else:
+                # fallback: print first available randomness length
+                if ddata['synthetic']:
+                    any_r = next(iter(ddata['synthetic'].keys()))
+                    print(f"   - Day {d}: {len(ddata['synthetic'][any_r])} stays @ randomness={any_r}")
+    except Exception:
+        pass
     
     # Generate timeline visualization
     fig = visualize_day_data(day_data, user_id=user_id)
@@ -1252,41 +1558,66 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict,
 
     # If spatial resources are provided, run spatial simulation in Porto and save trajectory + map
     if G is not None and gdf_cumulative_p is not None:
-        print("  ↳ Running spatial simulation in Porto...")
-        traj, osm_usage, map_loc, rmse = simulate_trips(
-            enriched,
-            G,
-            start_sym=None,
-            end_sym=None,
-            home_osm=None,
-            work_osm=None,
-            n_trials=10,
-            stay_time_error=0.2,
-            gdf_cumulative_p=gdf_cumulative_p,
-            use_cache=True,
-            use_prefetch=True,
-        )
-        if traj is None:
-            print("  ⚠ Spatial simulation failed for this user")
+        print("  ↳ Running spatial simulation in Porto (synthetic stays, all days)...")
+        chosen_r = RANDOMNESS_LEVELS[2] if len(RANDOMNESS_LEVELS) > 2 else RANDOMNESS_LEVELS[0]
+        # Compute home/work mapping once for the user and reuse across days
+        map_loc_imn_user, rmse_user = map_imn_to_osm(enriched, G, gdf_cumulative_p=gdf_cumulative_p)
+        fixed_home = map_loc_imn_user.get(enriched['home'])
+        fixed_work = map_loc_imn_user.get(enriched['work'])
+        per_day_outputs: Dict[datetime.date, Dict[str, Any]] = {}
+        combined_traj: List[Tuple[float, float, int]] = []
+        any_success = False
+        for some_day, ddata in day_data.items():
+            synthetic_for_r = ddata["synthetic"].get(chosen_r, [])
+            try:
+                print(f"[DEBUG] Spatial mapping is using day {some_day}, randomness={chosen_r}")
+                print(f"[DEBUG] Day {some_day} activities: {[act for (act,_,_) in synthetic_for_r]}")
+            except Exception:
+                pass
+            traj, osm_usage, pseudo_map_loc, rmse, legs_coords = simulate_synthetic_trips(
+                enriched,
+                synthetic_for_r,
+                G,
+                gdf_cumulative_p,
+                randomness=chosen_r,
+                fixed_home_node=fixed_home,
+                fixed_work_node=fixed_work,
+                precomputed_map_loc_rmse=(map_loc_imn_user, rmse_user),
+            )
+            if traj is None:
+                print(f"  ⚠ Spatial simulation failed for user {user_id} on day {some_day}")
+                continue
+            any_success = True
+            combined_traj.extend(traj)
+            per_day_outputs[some_day] = {
+                'trajectory': traj,
+                'pseudo_map_loc': pseudo_map_loc,
+                'synthetic_stays': synthetic_for_r,
+                'legs_coords': legs_coords,
+            }
+            try:
+                print(f"[DEBUG] Finished spatial mapping for user {user_id} day {some_day}: {len(synthetic_for_r)} stays, {len(traj)} points")
+            except Exception:
+                pass
+
+        if not any_success:
+            print("  ⚠ Spatial simulation failed for all days for this user")
         else:
+            # Save combined CSV
             traj_path = os.path.join(paths.results_dir, "synthetic_trajectories", f"user_{user_id}_porto_trajectory.csv")
             os.makedirs(os.path.dirname(traj_path), exist_ok=True)
-            df_traj = pd.DataFrame(traj, columns=["lat", "lon", "time"])
+            df_traj = pd.DataFrame(combined_traj, columns=["lat", "lon", "time"])
             df_traj.to_csv(traj_path, index=False)
-            print(f"  ✓ Spatial trajectory saved: {os.path.basename(traj_path)} (RMSE={rmse:.2f} km)")
+            print(f"  ✓ Spatial trajectory saved (all days combined): {os.path.basename(traj_path)}")
 
-            # Build stays_by_day from earlier step to compute per-location stats for popups
-            stays = extract_stays_from_trips(enriched['trips'], enriched['locations'])
-            stays_by_day_local = extract_stays_by_day(stays, tz)
-
-            # Generate interactive HTML map
+            # Generate multi-day interactive map with per-day layers and combined layer
             map_path = os.path.join(paths.results_dir, "synthetic_trajectories", f"user_{user_id}_porto_map.html")
             try:
-                generate_interactive_map(user_id, traj, map_loc, G, enriched, stays_by_day_local, map_path, draw_polyline=True)
-                print(f"  ✓ Interactive map saved: {os.path.basename(map_path)}")
+                generate_interactive_porto_map_multi(user_id, per_day_outputs, G, map_path)
+                print(f"  ✓ Interactive multi-day map saved: {os.path.basename(map_path)}")
                 porto_map_path = map_path
             except Exception as e:
-                print(f"  ⚠ Failed to create interactive map: {e}")
+                print(f"  ⚠ Failed to create interactive multi-day map: {e}")
 
     # Also create an interactive map in the original city using straight-line segments between IMN locations
     try:
