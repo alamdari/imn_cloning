@@ -22,6 +22,15 @@ import seaborn as sns
 import pandas as pd
 
 import imn_loading
+import pickle
+import requests
+import networkx as nx
+import osmnx as ox
+import rasterio
+from rasterio.mask import mask
+import geopandas as gpd
+from shapely.geometry import Polygon
+import folium
 
 # Configuration
 RANDOMNESS_LEVELS = [0.0, 0.25, 0.5, 0.75, 1.0]
@@ -58,6 +67,18 @@ POI_TO_ACTIVITY = {
 }
 
 
+# ------------------------------
+# Spatial constants/resources
+# ------------------------------
+PORTO_CENTER = (41.1494512, -8.6107884)
+PORTO_RADIUS_M = 10000
+SEDAC_TIFF_URL = "https://data.ghg.center/sedac-popdensity-yeargrid5yr-v4.11/gpw_v4_population_density_rev11_2020_30_sec_2020.tif"
+DATA_DIR = "data"
+PORTO_GRAPHML_PATH = os.path.join(DATA_DIR, "porto_drive.graphml")
+SEDAC_TIFF_PATH = os.path.join(DATA_DIR, "gpw_v4_population_density_rev11_2020_30_sec_2020.tif")
+POP_CUMULATIVE_P_PATH = os.path.join(DATA_DIR, "porto_population_cumulative.pkl")
+
+
 class Stay:
     """Represents a stay at a location with activity and timing information."""
     
@@ -86,6 +107,445 @@ class Stay:
 
 
 # ------------------------------
+# Spatial utilities (ported inline)
+# ------------------------------
+
+def haversine_distance(x1, y1, x2, y2):
+    R = 6371000  # meters
+    lat_rad1 = np.radians(y1)
+    lon_rad1 = np.radians(x1)
+    lat_rad2 = np.radians(y2)
+    lon_rad2 = np.radians(x2)
+    return 2 * R * np.arcsin(np.sqrt(np.sin((lat_rad2 - lat_rad1) / 2) ** 2 + np.cos(lat_rad1) * np.cos(lat_rad2) * (np.sin((lon_rad2 - lon_rad1) / 2) ** 2)))
+
+
+def retrieve_osm(center, radius=20000):
+    G = ox.graph.graph_from_point(center, dist=radius, network_type="drive", simplify=False)
+    G = ox.routing.add_edge_speeds(G)
+    G = ox.routing.add_edge_travel_times(G)
+    return G
+
+
+def create_trajectory(G, node_origin, node_destination, start_time, weight="travel_time", slow_factor=1, verbose=False, use_cache=True):
+    global osm_paths_cache
+
+    if verbose:
+        print(f"Computing path: {node_origin} --> {node_destination}...")
+
+    if node_origin == node_destination:
+        return [
+            (G.nodes[node_origin]["y"], G.nodes[node_origin]["x"], start_time),
+            (G.nodes[node_destination]["y"], G.nodes[node_destination]["x"], start_time + 60),
+        ], 60, []
+
+    if use_cache:
+        if (node_origin, node_destination) in osm_paths_cache:
+            route = osm_paths_cache[(node_origin, node_destination)]
+        else:
+            try:
+                route = nx.shortest_path(G, node_origin, node_destination, weight=weight)
+            except nx.NetworkXNoPath:
+                route = None
+            osm_paths_cache[(node_origin, node_destination)] = route
+    else:
+        try:
+            route = nx.shortest_path(G, node_origin, node_destination, weight=weight)
+        except nx.NetworkXNoPath:
+            route = None
+
+    if route is None:
+        return None, None, None
+
+    gdf_info_routes = ox.routing.route_to_gdf(G, route)
+    road_segments_osmid = list(gdf_info_routes[["osmid"]].index)
+    gps_points = [(G.nodes[node]["y"], G.nodes[node]["x"]) for node in route]
+    travel_time_edges = gdf_info_routes["travel_time"].values
+    travel_time_guess_edges = travel_time_edges * slow_factor
+    list_seconds = [0] + list(travel_time_guess_edges.cumsum())
+    trajectory = [(gps[0], gps[1], time + start_time) for gps, time in zip(gps_points, list_seconds)]
+    return trajectory, list_seconds[-1], road_segments_osmid
+
+
+def find_in_cumulative(df, p_r):
+    idx = np.searchsorted(df['cumulative_p'], p_r, side='left')
+    if idx < len(df):
+        return df.iloc[idx]['intersecting_nodes']
+    else:
+        return None
+
+
+def select_random_nodes(gdf_cumulative_p, n=10, all_nodes: Optional[List[int]] = None):
+    node_list: List[int] = []
+    for pr in np.random.random(n):
+        candidates = find_in_cumulative(gdf_cumulative_p, pr)
+        # Fallback if no intersecting nodes in the selected cell
+        if candidates is None or len(candidates) == 0:
+            if all_nodes is not None and len(all_nodes) > 0:
+                node_list.append(all_nodes[np.random.randint(len(all_nodes))])
+            else:
+                # As a last resort, skip; caller should handle empties
+                continue
+        else:
+            node_list.append(candidates[np.random.randint(len(candidates))])
+    return node_list
+
+
+def map_imn_to_osm(imn, target_osm, home_osm=None, work_osm=None, n_trials=10, gdf_cumulative_p=None):
+    best_dist = 999999999
+    nodes = list(target_osm.nodes())
+    if gdf_cumulative_p is None:
+        gdf_cumulative_p = pd.DataFrame({"cumulative_p": [1.0], "intersecting_nodes": [nodes]})
+    imn_dist = haversine_distance(
+        imn['locations'][imn['home']]['coordinates'][0],
+        imn['locations'][imn['home']]['coordinates'][1],
+        imn['locations'][imn['work']]['coordinates'][0],
+        imn['locations'][imn['work']]['coordinates'][1],
+    )
+    for _ in range(n_trials):
+        tmp_home_osm = home_osm if home_osm is not None else select_random_nodes(gdf_cumulative_p, n=1, all_nodes=nodes)[0]
+        tmp_work_osm = work_osm if work_osm is not None else select_random_nodes(gdf_cumulative_p, n=1, all_nodes=nodes)[0]
+        dist = haversine_distance(
+            target_osm.nodes[tmp_home_osm]['x'],
+            target_osm.nodes[tmp_home_osm]['y'],
+            target_osm.nodes[tmp_work_osm]['x'],
+            target_osm.nodes[tmp_work_osm]['y'],
+        )
+        if abs(dist - imn_dist) < abs(best_dist - imn_dist):
+            best_home = tmp_home_osm
+            best_work = tmp_work_osm
+            best_dist = dist
+
+    map_loc = {imn['home']: best_home, imn['work']: best_work}
+    SE = (best_dist / 1000 - imn_dist / 1000) ** 2
+
+    for loc in imn['locations'].keys():
+        if loc in map_loc:
+            continue
+        best_dist_loc = 99999999999
+        for _ in range(n_trials):
+            tmp_osm = select_random_nodes(gdf_cumulative_p, n=1, all_nodes=nodes)[0]
+            dist_sum = 0
+            for imn_l, osm_l in map_loc.items():
+                dist_osm = haversine_distance(
+                    target_osm.nodes[tmp_osm]['x'],
+                    target_osm.nodes[tmp_osm]['y'],
+                    target_osm.nodes[osm_l]['x'],
+                    target_osm.nodes[osm_l]['y'],
+                )
+                dist_imn = haversine_distance(
+                    imn['locations'][loc]['coordinates'][0],
+                    imn['locations'][loc]['coordinates'][1],
+                    imn['locations'][imn_l]['coordinates'][0],
+                    imn['locations'][imn_l]['coordinates'][1],
+                )
+                dist_sum += (dist_osm / 1000 - dist_imn / 1000) ** 2
+            if dist_sum < best_dist_loc:
+                best_osm = tmp_osm
+                best_dist_loc = dist_sum
+        map_loc[loc] = best_osm
+        SE += best_dist_loc
+
+    if len(map_loc) > 1:
+        rmse = np.sqrt(SE / (len(map_loc) * (len(map_loc) - 1) / 2))
+    else:
+        rmse = 0
+    return map_loc, rmse
+
+
+osm_paths_cache = {}
+
+
+def init_osm_paths_cache(imn, G, map_loc, use_prefetch=False):
+    global osm_paths_cache
+    if use_prefetch:
+        for _ in range(len(osm_paths_cache) - 500000):
+            osm_paths_cache.popitem()
+        map_loc_set = [map_loc[loc] for loc in imn['locations'].keys()]
+        for loc in imn['locations'].keys():
+            if imn['locations'][loc]['frequency'] > 10:
+                node_origin = map_loc[loc]
+                routes = nx.single_source_dijkstra_path(G, source=node_origin, cutoff=None, weight="travel_time")
+                for dest, path in routes.items():
+                    if dest in map_loc_set:
+                        osm_paths_cache[(node_origin, dest)] = path
+    else:
+        osm_paths_cache = {}
+
+
+def simulate_trips(
+    imn,
+    target_osm,
+    start_sym=None,
+    end_sym=None,
+    home_osm=None,
+    work_osm=None,
+    n_trials=10,
+    stay_time_error=0.2,
+    gdf_cumulative_p=None,
+    use_cache=True,
+    use_prefetch=False,
+):
+    map_loc, rmse = map_imn_to_osm(
+        imn,
+        target_osm,
+        home_osm=home_osm,
+        work_osm=work_osm,
+        n_trials=n_trials,
+        gdf_cumulative_p=gdf_cumulative_p,
+    )
+
+    if start_sym is None:
+        start_sym = min([r[2] for r in imn['trips']]) - 1
+    if end_sym is None:
+        end_sym = max([r[2] for r in imn['trips']]) + 1
+
+    sym_time = None
+    prev_end = None
+    trajectory = []
+    osm_segments_usage = {}
+    if use_cache:
+        init_osm_paths_cache(imn, target_osm, map_loc, use_prefetch=use_prefetch)
+    for l_from, l_to, st, end in imn['trips']:
+        if l_from == l_to:
+            continue
+        if (st < start_sym) or (st > end_sym):
+            continue
+        if sym_time is None:
+            sym_time = st
+            prev_end = st
+        sym_stay = (st - prev_end) + random.randint(-int((st - prev_end) * stay_time_error), int((st - prev_end) * stay_time_error))
+        sym_time += sym_stay
+        prev_end = end
+
+        shortest_p, duration_p, osm_segments = create_trajectory(target_osm, map_loc[l_from], map_loc[l_to], sym_time, use_cache=use_cache)
+        if shortest_p is None:
+            return None, None, None, None
+
+        trajectory.extend(shortest_p)
+        sym_time += duration_p
+        for oss in osm_segments:
+            osm_segments_usage[oss] = osm_segments_usage.get(oss, 0) + 1
+
+    return trajectory, osm_segments_usage, map_loc, rmse
+
+
+# ------------------------------
+# Population utilities (ported inline)
+# ------------------------------
+
+def fetch_population_data_from_tiff(tiff_file, bbox):
+    min_lon, min_lat, max_lon, max_lat = bbox
+    with rasterio.open(tiff_file) as src:
+        bbox_geom = {
+            "type": "Polygon",
+            "coordinates": [[
+                (min_lon, min_lat), (max_lon, min_lat), (max_lon, max_lat),
+                (min_lon, max_lat), (min_lon, min_lat)
+            ]],
+        }
+        out_image, out_transform = mask(src, [bbox_geom], crop=True)
+        out_image = out_image[0]
+        population_data = []
+        rows, cols = np.where(out_image > 0)
+        for row, col in zip(rows, cols):
+            population_density = out_image[row, col]
+            x, y = out_transform * (col, row)
+            x2, y2 = out_transform * (col + 1, row + 1)
+            cell_polygon = Polygon([(x, y), (x2, y), (x2, y2), (x, y2), (x, y)])
+            population_data.append({"population_density": float(population_density), "geometry": cell_polygon})
+        population_gdf = gpd.GeoDataFrame(population_data, geometry="geometry")
+        population_gdf.set_crs(src.crs, inplace=True)
+    return population_gdf
+
+
+def add_intersecting_nodes(gdf, graph):
+    nodes_gdf = ox.graph_to_gdfs(graph, nodes=True, edges=False)
+    if gdf.crs != nodes_gdf.crs:
+        nodes_gdf = nodes_gdf.to_crs(gdf.crs)
+    intersecting_node_ids = []
+    for geom in gdf.geometry:
+        intersecting_nodes = nodes_gdf[nodes_gdf.intersects(geom)]
+        intersecting_node_ids.append(intersecting_nodes.index.tolist())
+    gdf = gdf.copy()
+    gdf['intersecting_nodes'] = intersecting_node_ids
+    return gdf
+
+
+def generate_cumulative_map(population_tiff_file, G):
+    bbox = ox.graph_to_gdfs(G, nodes=True, edges=False).total_bounds
+    population_gdf = fetch_population_data_from_tiff(population_tiff_file, bbox)
+    gdf_extended = add_intersecting_nodes(population_gdf, G)
+    gdf_extended['p'] = gdf_extended['population_density'] / gdf_extended.population_density.sum()
+    gdf_extended['cumulative_p'] = gdf_extended['p'].cumsum()
+    gdf_cumulative_p = gdf_extended[['cumulative_p', 'intersecting_nodes']]
+    return gdf_cumulative_p
+
+
+def ensure_spatial_resources() -> Tuple[nx.MultiDiGraph, pd.DataFrame]:
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+    # OSM graph: load from disk or download once
+    if os.path.exists(PORTO_GRAPHML_PATH):
+        G = ox.load_graphml(PORTO_GRAPHML_PATH)
+    else:
+        print(" - Downloading Porto OSM graph...", end="", flush=True)
+        G = retrieve_osm(PORTO_CENTER, PORTO_RADIUS_M)
+        ox.save_graphml(G, PORTO_GRAPHML_PATH)
+        print(" saved")
+
+    # TIFF: download if missing
+    if not os.path.exists(SEDAC_TIFF_PATH):
+        print(" - Downloading SEDAC population TIFF...", end="", flush=True)
+        resp = requests.get(SEDAC_TIFF_URL)
+        resp.raise_for_status()
+        with open(SEDAC_TIFF_PATH, 'wb') as f:
+            f.write(resp.content)
+        print(" downloaded")
+
+    # Cumulative population map: cache to pickle
+    if os.path.exists(POP_CUMULATIVE_P_PATH):
+        with open(POP_CUMULATIVE_P_PATH, 'rb') as f:
+            gdf_cumulative_p = pickle.load(f)
+    else:
+        print(" - Building population cumulative map...", end="", flush=True)
+        gdf_cumulative_p = generate_cumulative_map(SEDAC_TIFF_PATH, G)
+        with open(POP_CUMULATIVE_P_PATH, 'wb') as f:
+            pickle.dump(gdf_cumulative_p, f)
+        print(" saved")
+
+    return G, gdf_cumulative_p
+
+
+# ------------------------------
+# Visualization: interactive map of trajectory and endpoints
+# ------------------------------
+
+def _compute_location_stats_from_stays(stays_by_day: Dict[datetime.date, List[Stay]]) -> Dict[int, Dict[str, Any]]:
+    stats: Dict[int, Dict[str, Any]] = {}
+    for _, day_stays in stays_by_day.items():
+        for s in day_stays:
+            if s.location_id not in stats:
+                stats[s.location_id] = {"visits": 0, "total_duration": 0}
+            stats[s.location_id]["visits"] += 1
+            if s.duration is not None:
+                stats[s.location_id]["total_duration"] += int(s.duration)
+    return stats
+
+
+def generate_interactive_map(user_id: int,
+                             trajectory: List[Tuple[float, float, int]],
+                             map_loc: Dict[int, int],
+                             G: nx.MultiDiGraph,
+                             enriched_imn: Dict,
+                             stays_by_day: Dict[datetime.date, List[Stay]],
+                             out_html_path: str,
+                             draw_polyline: bool = True) -> None:
+    if not trajectory and not map_loc:
+        return
+
+    # Center map on the midpoint of trajectory if provided, otherwise on mapped nodes
+    if trajectory:
+        mid_idx = len(trajectory) // 2
+        center_lat, center_lon = trajectory[mid_idx][0], trajectory[mid_idx][1]
+    else:
+        lats = []
+        lons = []
+        for _, osm_node in map_loc.items():
+            node_data = G.nodes[osm_node]
+            lats.append(node_data['y'])
+            lons.append(node_data['x'])
+        if not lats or not lons:
+            return
+        center_lat = float(np.mean(lats))
+        center_lon = float(np.mean(lons))
+
+    # Create map with semi-transparent OSM tiles
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=13, tiles=None)
+    folium.TileLayer('OpenStreetMap', opacity=0.6, control=False).add_to(m)
+
+    # Draw trajectory polyline (optional)
+    if draw_polyline and trajectory:
+        polyline_coords = [(lat, lon) for lat, lon, _ in trajectory]
+        folium.PolyLine(polyline_coords, color="#1f77b4", weight=3, opacity=0.8, tooltip="Trajectory").add_to(m)
+
+    # Compute per-location stats from stays
+    loc_stats = _compute_location_stats_from_stays(stays_by_day)
+
+    # Add markers for each IMN location (mapped to OSM node)
+    for loc_id, osm_node in map_loc.items():
+        node_data = G.nodes[osm_node]
+        node_lat = node_data['y']
+        node_lon = node_data['x']
+        loc_info = enriched_imn['locations'].get(loc_id, {})
+        activity = loc_info.get('activity_label', 'unknown')
+        freq = loc_info.get('frequency', None)
+        stat = loc_stats.get(loc_id, {"visits": 0, "total_duration": 0})
+        total_hours = round(stat["total_duration"] / 3600.0, 2) if stat["total_duration"] else 0.0
+        popup_html = f"""
+        <div style='font-size:12px;'>
+            <b>User:</b> {user_id}<br/>
+            <b>Location ID:</b> {loc_id}<br/>
+            <b>Activity:</b> {activity}<br/>
+            <b>Visits (days stays):</b> {stat['visits']}<br/>
+            <b>Total stay duration (h):</b> {total_hours}<br/>
+            <b>IMN frequency:</b> {freq if freq is not None else '-'}<br/>
+            <b>OSM node:</b> {osm_node}
+        </div>
+        """
+        # Color indicator using ACTIVITY_COLORS as a small circle, plus default Marker on top
+        marker_color = ACTIVITY_COLORS.get(activity, "black")
+        folium.CircleMarker(
+            [node_lat, node_lon],
+            radius=6,
+            color=marker_color,
+            fill=True,
+            fill_color=marker_color,
+            fill_opacity=0.9,
+            weight=2,
+            popup=folium.Popup(popup_html, max_width=300),
+            tooltip=f"{activity}"
+        ).add_to(m)
+
+    # Save map
+    os.makedirs(os.path.dirname(out_html_path), exist_ok=True)
+    m.save(out_html_path)
+
+
+def create_split_map_html(left_title: str, left_src: str, right_title: str, right_src: str, out_html_path: str) -> None:
+    os.makedirs(os.path.dirname(out_html_path), exist_ok=True)
+    html = f"""
+<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"UTF-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />
+  <title>Split Map View</title>
+  <style>
+    body {{ margin: 0; padding: 0; font-family: Arial, sans-serif; }}
+    .container {{ display: flex; height: 100vh; width: 100vw; }}
+    .pane {{ flex: 1; display: flex; flex-direction: column; min-width: 0; }}
+    .header {{ padding: 8px 12px; background: #f5f5f5; border-bottom: 1px solid #ddd; font-weight: bold; }}
+    .frame {{ flex: 1; border: 0; width: 100%; }}
+  </style>
+  </head>
+  <body>
+    <div class=\"container\">
+      <div class=\"pane\">
+        <div class=\"header\">{left_title}</div>
+        <iframe class=\"frame\" src=\"{left_src}\"></iframe>
+      </div>
+      <div class=\"pane\"> 
+        <div class=\"header\">{right_title}</div>
+        <iframe class=\"frame\" src=\"{right_src}\"></iframe>
+      </div>
+    </div>
+  </body>
+</html>
+"""
+    with open(out_html_path, 'w') as f:
+        f.write(html)
+
+# ------------------------------
 # IO / CONFIG
 # ------------------------------
 
@@ -95,8 +555,8 @@ class PathsConfig:
     test_imn_path: str = 'data/test_milano_imns.json.gz'
     poi_path: str = 'data/test_milano_imns_pois.json.gz'
     results_dir: str = './results'
-    prob_subdir: str = 'user_probability_reports3'
-    vis_subdir: str = 'user_timeline_visualizations3'
+    prob_subdir: str = 'user_probability_reports4'
+    vis_subdir: str = 'user_timeline_visualizations4'
 
     def prob_dir(self) -> str:
         return os.path.join(self.results_dir, self.prob_subdir)
@@ -117,8 +577,8 @@ def parse_args(argv: Optional[List[str]] = None) -> PathsConfig:
     parser.add_argument('--test-imn', default='data/test_milano_imns.json.gz', help='Path to subset/test IMNs.')
     parser.add_argument('--poi', default='data/test_milano_imns_pois.json.gz', help='Path to POI enrichment data.')
     parser.add_argument('--results-dir', default='./results', help='Base directory for results.')
-    parser.add_argument('--prob-subdir', default='user_probability_reports3', help='Probability reports subdirectory.')
-    parser.add_argument('--vis-subdir', default='user_timeline_visualizations3', help='Timeline visualizations subdirectory.')
+    parser.add_argument('--prob-subdir', default='user_probability_reports4', help='Probability reports subdirectory.')
+    parser.add_argument('--vis-subdir', default='user_timeline_visualizations4', help='Timeline visualizations subdirectory.')
     parser.add_argument('--seed', type=int, default=None, help='Random seed for reproducibility (optional).')
     args = parser.parse_args(argv)
 
@@ -749,7 +1209,8 @@ def visualize_day_data(day_data: Dict, user_id: int = 0) -> plt.Figure:
 
 
 def process_single_user(user_id: int, imn: Dict, poi_info: Dict, 
-                       randomness_levels: List[float], paths: PathsConfig, tz) -> None:
+                       randomness_levels: List[float], paths: PathsConfig, tz,
+                       G: nx.MultiDiGraph = None, gdf_cumulative_p: pd.DataFrame = None) -> None:
     """Process a single user and generate all outputs."""
     print(f"Processing user {user_id}...")
     
@@ -786,9 +1247,106 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict,
     
     print(f"  ✓ Timeline visualization saved: {os.path.basename(timeline_path)}")
 
+    # Track generated Porto map path for optional split view
+    porto_map_path: Optional[str] = None
+
+    # If spatial resources are provided, run spatial simulation in Porto and save trajectory + map
+    if G is not None and gdf_cumulative_p is not None:
+        print("  ↳ Running spatial simulation in Porto...")
+        traj, osm_usage, map_loc, rmse = simulate_trips(
+            enriched,
+            G,
+            start_sym=None,
+            end_sym=None,
+            home_osm=None,
+            work_osm=None,
+            n_trials=10,
+            stay_time_error=0.2,
+            gdf_cumulative_p=gdf_cumulative_p,
+            use_cache=True,
+            use_prefetch=True,
+        )
+        if traj is None:
+            print("  ⚠ Spatial simulation failed for this user")
+        else:
+            traj_path = os.path.join(paths.results_dir, "synthetic_trajectories", f"user_{user_id}_porto_trajectory.csv")
+            os.makedirs(os.path.dirname(traj_path), exist_ok=True)
+            df_traj = pd.DataFrame(traj, columns=["lat", "lon", "time"])
+            df_traj.to_csv(traj_path, index=False)
+            print(f"  ✓ Spatial trajectory saved: {os.path.basename(traj_path)} (RMSE={rmse:.2f} km)")
+
+            # Build stays_by_day from earlier step to compute per-location stats for popups
+            stays = extract_stays_from_trips(enriched['trips'], enriched['locations'])
+            stays_by_day_local = extract_stays_by_day(stays, tz)
+
+            # Generate interactive HTML map
+            map_path = os.path.join(paths.results_dir, "synthetic_trajectories", f"user_{user_id}_porto_map.html")
+            try:
+                generate_interactive_map(user_id, traj, map_loc, G, enriched, stays_by_day_local, map_path, draw_polyline=True)
+                print(f"  ✓ Interactive map saved: {os.path.basename(map_path)}")
+                porto_map_path = map_path
+            except Exception as e:
+                print(f"  ⚠ Failed to create interactive map: {e}")
+
+    # Also create an interactive map in the original city using straight-line segments between IMN locations
+    try:
+        print("  ↳ Creating original-city map...")
+        # Build straight-line trajectory from IMN trips (lat/lon/time)
+        straight_traj = []
+        for l_from, l_to, st, et in enriched['trips']:
+            from_lat, from_lon = enriched['locations'][l_from]['coordinates'][1], enriched['locations'][l_from]['coordinates'][0]
+            to_lat, to_lon = enriched['locations'][l_to]['coordinates'][1], enriched['locations'][l_to]['coordinates'][0]
+            straight_traj.append((from_lat, from_lon, st))
+            straight_traj.append((to_lat, to_lon, et))
+
+        stays_by_day_local = stays_by_day  # already computed earlier from enriched IMN
+        orig_map_path = os.path.join(paths.results_dir, "synthetic_trajectories", f"user_{user_id}_original_city_map.html")
+
+        # Use a dummy SmallGraph to reuse generate_interactive_map: create node entries for each IMN location
+        class SmallGraph:
+            def __init__(self):
+                self.nodes = {}
+        G_small = SmallGraph()
+        map_loc_orig = {}
+        for loc_id, loc in enriched['locations'].items():
+            fake_node_id = loc_id  # reuse loc_id as node id
+            map_loc_orig[loc_id] = fake_node_id
+            G_small.nodes[fake_node_id] = { 'x': loc['coordinates'][0], 'y': loc['coordinates'][1] }
+
+        # Do not draw trajectory on original map (only markers by activity color)
+        generate_interactive_map(user_id, straight_traj, map_loc_orig, G_small, enriched, stays_by_day_local, orig_map_path, draw_polyline=False)
+        print(f"  ✓ Original-city map saved: {os.path.basename(orig_map_path)}")
+
+        # Build split view HTML combining the two maps (only if Porto map was created)
+        if porto_map_path is not None:
+            split_path = os.path.join(paths.results_dir, "synthetic_trajectories", f"user_{user_id}_split_map.html")
+            try:
+                left_rel = os.path.basename(orig_map_path)
+                right_rel = os.path.basename(porto_map_path)
+                create_split_map_html("Original IMN (source city)", left_rel, "Simulated Trajectory (Porto)", right_rel, split_path)
+                print(f"  ✓ Split map saved: {os.path.basename(split_path)}")
+            except Exception as e:
+                print(f"  ⚠ Failed to create split map: {e}")
+        else:
+            print("  ⚠ Split map skipped (Porto map not available)")
+    except Exception as e:
+        print(f"  ⚠ Failed to create original-city map: {e}")
+
 
 def load_datasets(paths: PathsConfig) -> Tuple[Dict, Dict]:
     print("Loading data...")
+    cache_path = os.path.join(paths.results_dir, "datasets_cache.pkl")
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'rb') as f:
+                cached = pickle.load(f)
+            imns = cached["imns"]
+            poi_data = cached["poi"]
+            print(f"✓ Loaded datasets from cache ({cache_path})")
+            return imns, poi_data
+        except Exception as e:
+            print(f"⚠ Failed to load cache, re-reading datasets: {e}")
+
     # Load full dataset first to get user IDs
     full_imns = imn_loading.read_imn(paths.full_imn_path)
     filtered_user_ids = list(full_imns.keys())
@@ -800,6 +1358,15 @@ def load_datasets(paths: PathsConfig) -> Tuple[Dict, Dict]:
 
     poi_data = read_poi_data(paths.poi_path)
     print(f"✓ Loaded {len(imns)} IMNs and POI data for {len(poi_data)} users")
+
+    # Persist datasets to pickle for faster reloads in iterative runs
+    try:
+        os.makedirs(paths.results_dir, exist_ok=True)
+        with open(cache_path, 'wb') as f:
+            pickle.dump({"imns": imns, "poi": poi_data, "full_user_ids": filtered_user_ids}, f)
+    except Exception as e:
+        print(f"⚠ Could not cache datasets: {e}")
+
     return imns, poi_data
 
 
@@ -820,18 +1387,41 @@ def run_pipeline(paths: PathsConfig, randomness_levels: List[float], tz) -> None
         print(f"❌ Error loading data: {e}")
         return
 
+    # Ensure spatial resources (download/cache once) and keep in memory
+    try:
+        print("Preparing spatial resources (Porto OSM + population TIFF)...")
+        G, gdf_cumulative_p = ensure_spatial_resources()
+        print("✓ Spatial resources ready")
+    except Exception as e:
+        print(f"⚠ Spatial resources setup failed: {e}")
+        G, gdf_cumulative_p = None, None
+
     print(f"\nProcessing {len(imns)} users...")
     print("-" * 40)
-    for i, (user_id, imn) in enumerate(imns.items(), 1):
-        print(f"[{i}/{len(imns)}] ", end="")
-        if user_id not in poi_data:
-            print(f"⚠ No POI data found for user {user_id}, skipping...")
-            continue
-        try:
-            process_single_user(user_id, imn, poi_data[user_id], randomness_levels, paths, tz)
-        except Exception as e:
-            print(f"❌ Error processing user {user_id}: {e}")
-            continue
+    # For quick tests: restrict to user 3695 only
+    target_user_id = 3695
+    if target_user_id not in imns:
+        print(f"❌ Target user {target_user_id} not found in IMNs subset. Abort.")
+        return
+    if target_user_id not in poi_data:
+        print(f"❌ Target user {target_user_id} has no POI data. Abort.")
+        return
+
+    print("\nProcessing 1 user (ID 3695) for quick test...")
+    print("-" * 40)
+    try:
+        process_single_user(
+            target_user_id,
+            imns[target_user_id],
+            poi_data[target_user_id],
+            randomness_levels,
+            paths,
+            tz,
+            G=G,
+            gdf_cumulative_p=gdf_cumulative_p,
+        )
+    except Exception as e:
+        print(f"❌ Error processing user {target_user_id}: {e}")
 
     print("\n" + "=" * 60)
     print("Processing complete!")
