@@ -383,6 +383,7 @@ def generate_cumulative_map(population_tiff_file, G):
     return gdf_cumulative_p
 
 
+# ** Prepare OSM graph and population raster (used for node sampling)
 def ensure_spatial_resources() -> Tuple[nx.MultiDiGraph, pd.DataFrame]:
     os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -565,6 +566,7 @@ def create_split_map_html(left_title: str, left_src: str, right_title: str, righ
 # Synthetic stays → spatial trips simulation
 # ------------------------------
 
+# ** Map original IMN home/work locations to fixed OSM nodes
 def simulate_synthetic_trips(
     imn: Dict,
     synthetic_stays: List[Tuple[str, int, int]],
@@ -583,6 +585,7 @@ def simulate_synthetic_trips(
     if not synthetic_stays:
         return None, None, None, None, None
 
+    # ** Map original IMN home/work locations to fixed OSM nodes
     # Establish fixed home/work mapping once
     if precomputed_map_loc_rmse is not None:
         map_loc_imn, rmse = precomputed_map_loc_rmse
@@ -596,14 +599,17 @@ def simulate_synthetic_trips(
     work_node = fixed_work_node if fixed_work_node is not None else map_loc_imn.get(imn['work'])
     all_nodes = list(G.nodes())
 
+    # ** Assign each stay to an OSM node (home/work fixed, others via sampling/POI)
     # Per-stay mapping: assign one OSM node per stay instance
     stay_nodes: List[int] = []
     unique_acts = [ act for (act, _, _) in synthetic_stays ]
     print(f"    [synthetic] activities in day (ordered): {unique_acts}")
     for idx, (act, st, et) in enumerate(synthetic_stays):
+        # ** Normalize activity labels to ensure consistent mapping rules
         # Debug type and normalize label
         print(f"    [synthetic][debug] activity label type: {act} ({type(act)})")
         act_label = str(act).lower() if act is not None else "unknown"
+        # ** Assign each stay to an OSM node (home/work fixed, others via sampling/POI)
         if act_label == 'home' and home_node is not None:
             stay_nodes.append(home_node)
         elif act_label == 'work' and work_node is not None:
@@ -657,6 +663,7 @@ def simulate_synthetic_trips(
         origin_node = stay_nodes[i]
         dest_node = stay_nodes[i + 1]
 
+        # ** Compute shortest path in OSM graph between consecutive stay nodes
         # Allocated gap (trip window)
         allocated_gap = max(0, st_to - et_from)
 
@@ -670,6 +677,7 @@ def simulate_synthetic_trips(
             leg_fail += 1
             continue
 
+        # ** Adjust stay start/end times if travel duration > or < allocated gap
         if duration_p > allocated_gap:
             # Need more time than allocated
             delta = int(duration_p - allocated_gap)
@@ -746,10 +754,6 @@ def generate_interactive_porto_map_multi(
     m = folium.Map(location=[center_lat, center_lon], zoom_start=13, tiles=None)
     folium.TileLayer('OpenStreetMap', opacity=0.6, control=False).add_to(m)
 
-    # Combined layer
-    combined = folium.FeatureGroup(name="All Days Combined", show=False)
-    combined_coords: List[Tuple[float, float]] = []
-
     # Static layer for unique home/work markers across all days
     static_hw = folium.FeatureGroup(name="Home/Work", show=True)
     added_hw_nodes = set()
@@ -772,13 +776,11 @@ def generate_interactive_porto_map_multi(
                     else:
                         opacity = max(0.45, 1.0 - (i * (1.0 - 0.45) / (n_legs - 1)))
                     folium.PolyLine(coords, color="#1f77b4", weight=3, opacity=opacity, tooltip=f"Trip {i+1} - {day_label}").add_to(fg)
-                    combined_coords.extend(coords)
         else:
             traj = content['trajectory']
             if traj:
                 coords = [(lat, lon) for lat, lon, _ in traj]
                 folium.PolyLine(coords, color="#1f77b4", weight=3, opacity=0.9, tooltip=f"Trajectory {day_label}").add_to(fg)
-                combined_coords.extend(coords)
 
         pseudo_map_loc = content['pseudo_map_loc']
         synthetic_stays = content['synthetic_stays']
@@ -828,9 +830,6 @@ def generate_interactive_porto_map_multi(
 
         fg.add_to(m)
 
-    if combined_coords:
-        folium.PolyLine(combined_coords, color="#2ca02c", weight=2, opacity=0.7, tooltip="All Days Combined").add_to(combined)
-    combined.add_to(m)
     static_hw.add_to(m)
 
     folium.LayerControl(collapsed=False).add_to(m)
@@ -1729,30 +1728,24 @@ def run_pipeline(paths: PathsConfig, randomness_levels: List[float], tz) -> None
 
     print(f"\nProcessing {len(imns)} users...")
     print("-" * 40)
-    # For quick tests: restrict to user 3695 only
-    target_user_id = 3695
-    if target_user_id not in imns:
-        print(f"❌ Target user {target_user_id} not found in IMNs subset. Abort.")
-        return
-    if target_user_id not in poi_data:
-        print(f"❌ Target user {target_user_id} has no POI data. Abort.")
-        return
-
-    print("\nProcessing 1 user (ID 3695) for quick test...")
-    print("-" * 40)
-    try:
-        process_single_user(
-            target_user_id,
-            imns[target_user_id],
-            poi_data[target_user_id],
-            randomness_levels,
-            paths,
-            tz,
-            G=G,
-            gdf_cumulative_p=gdf_cumulative_p,
-        )
-    except Exception as e:
-        print(f"❌ Error processing user {target_user_id}: {e}")
+    # Process first 20 users that have POI data
+    selected_user_ids = [uid for uid in imns.keys() if uid in poi_data][:20]
+    print(f"Processing first {len(selected_user_ids)} users...")
+    for idx, uid in enumerate(selected_user_ids, 1):
+        print(f"[{idx}/{len(selected_user_ids)}] ")
+        try:
+            process_single_user(
+                uid,
+                imns[uid],
+                poi_data[uid],
+                randomness_levels,
+                paths,
+                tz,
+                G=G,
+                gdf_cumulative_p=gdf_cumulative_p,
+            )
+        except Exception as e:
+            print(f"❌ Error processing user {uid}: {e}")
 
     print("\n" + "=" * 60)
     print("Processing complete!")
