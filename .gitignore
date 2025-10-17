@@ -4,6 +4,7 @@ data/*
 
 # Results folder - ignore contents but keep folder
 results/*
+results_smallrun/*
 stay_visualizations5/*
 cache/*
 !stay_visualizations5/.gitkeep

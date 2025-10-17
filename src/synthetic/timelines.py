@@ -157,6 +157,11 @@ def prepare_day_data(stays_by_day: Dict, user_duration_probs: Dict, user_transit
         first_dt = datetime.fromtimestamp(day[0].start_time, tz)
         midnight_dt = first_dt.replace(hour=0, minute=0, second=0, microsecond=0)
         day_start = int(midnight_dt.timestamp())
+        # Original stays in relative seconds
+        original_stays = [
+            (s.activity_label, int(s.start_time - day_start), int(s.end_time - day_start))
+            for s in day if (s.start_time is not None and s.end_time is not None)
+        ]
         synthetic_dict = {}
         for r in randomness_levels:
             synthetic = generate_synthetic_day(day, user_duration_probs, user_transition_probs, randomness=r, tz=tz)
@@ -170,6 +175,7 @@ def prepare_day_data(stays_by_day: Dict, user_duration_probs: Dict, user_transit
                 anchor.end_time - day_start,
             )
         day_data[day_date] = {
+            "original": original_stays,
             "synthetic": synthetic_dict,
             "anchor": anchor_tuple
         }

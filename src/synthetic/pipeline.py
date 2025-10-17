@@ -11,6 +11,7 @@ from src.synthetic.spatial_sim import simulate_synthetic_trips
 from src.synthetic.stays import read_stays_from_trips, extract_stays_by_day
 from src.synthetic.enrich import enrich_imn_with_poi
 from src.visualization.reports import user_probs_report
+from src.visualization.timelines import save_user_timelines
 from src.visualization.maps import generate_interactive_porto_map_multi, generate_interactive_original_city_map, create_split_map_html
 
 
@@ -25,6 +26,12 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_leve
     user_duration_probs, user_transition_probs, user_trip_duration_probs = build_stay_distributions(stays_by_day)
     user_probs_report(user_duration_probs, user_transition_probs, user_trip_duration_probs, user_id, paths.prob_dir())
     day_data = prepare_day_data(stays_by_day, user_duration_probs, user_transition_probs, randomness_levels, tz)
+
+    # Save timeline visualization PNG per user via visualization module
+    try:
+        save_user_timelines(day_data, user_id, paths)
+    except Exception as e:
+        print(f"  ⚠ Failed to save timeline visualization for user {user_id}: {e}")
 
     print("  ↳ Running spatial simulation in Porto (synthetic stays, all days)...")
     chosen_r = randomness_levels[2] if len(randomness_levels) > 2 else randomness_levels[0]
@@ -119,7 +126,7 @@ def run_pipeline(paths: PathsConfig, randomness_levels: List[float], tz) -> None
 
     print(f"\nProcessing {len(imns)} users...")
     print("-" * 40)
-    selected_user_ids = [uid for uid in imns.keys() if uid in poi_data][:20]
+    selected_user_ids = [uid for uid in imns.keys() if uid in poi_data][:10]
     print(f"Processing first {len(selected_user_ids)} users...")
     for idx, uid in enumerate(selected_user_ids, 1):
         print(f"[{idx}/{len(selected_user_ids)}] ")
