@@ -15,7 +15,7 @@ from src.visualization.timelines import save_user_timelines
 from src.visualization.maps import generate_interactive_porto_map_multi, generate_interactive_original_city_map, create_split_map_html
 
 
-def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_levels: List[float], paths: PathsConfig, tz, G, gdf_cumulative_p) -> None:
+def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_levels: List[float], paths: PathsConfig, tz, G, gdf_cumulative_p, activity_pools: Dict[str, List[int]]) -> None:
     print(f"Processing user {user_id}...")
     enriched = enrich_imn_with_poi(imn, poi_info)
     stays = read_stays_from_trips(enriched['trips'], enriched['locations'])
@@ -41,8 +41,9 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_leve
     fixed_work = map_loc_imn_user.get(enriched['work'])
 
     per_day_outputs: Dict[Any, Dict[str, Any]] = {}
-    combined_traj: List[Tuple[float, float, int]] = []
+    combined_traj: List[Tuple[int, float, float, int]] = []
     any_success = False
+    trajectory_id = 0
     for some_day, ddata in day_data.items():
         synthetic_for_r = ddata["synthetic"].get(chosen_r, [])
         traj, osm_usage, pseudo_map_loc, rmse, legs_coords = simulate_synthetic_trips(
@@ -54,12 +55,16 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_leve
             fixed_home_node=fixed_home,
             fixed_work_node=fixed_work,
             precomputed_map_loc_rmse=(map_loc_imn_user, rmse_user),
+            activity_pools=activity_pools,
         )
         if traj is None:
             print(f"  ⚠ Spatial simulation failed for user {user_id} on day {some_day}")
             continue
         any_success = True
-        combined_traj.extend(traj)
+        trajectory_id += 1
+        # Add trajectory_id to each point (trajectory_id, lat, lon, time)
+        traj_with_id = [(trajectory_id, lat, lon, time) for lat, lon, time in traj]
+        combined_traj.extend(traj_with_id)
         per_day_outputs[some_day] = {
             'trajectory': traj,
             'pseudo_map_loc': pseudo_map_loc,
@@ -73,7 +78,7 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_leve
 
     traj_path = os.path.join(paths.results_dir, "synthetic_trajectories", f"user_{user_id}_porto_trajectory.csv")
     os.makedirs(os.path.dirname(traj_path), exist_ok=True)
-    pd.DataFrame(combined_traj, columns=["lat", "lon", "time"]).to_csv(traj_path, index=False)
+    pd.DataFrame(combined_traj, columns=["trajectory_id", "lat", "lon", "time"]).to_csv(traj_path, index=False)
     print(f"  ✓ Spatial trajectory saved (all days combined): {os.path.basename(traj_path)}")
 
     map_path = os.path.join(paths.results_dir, "synthetic_trajectories", f"user_{user_id}_porto_map.html")
@@ -117,21 +122,21 @@ def run_pipeline(paths: PathsConfig, randomness_levels: List[float], tz) -> None
         return
 
     try:
-        print("Preparing spatial resources (Porto OSM + population TIFF)...")
-        G, gdf_cumulative_p = ensure_spatial_resources("data", generate_cumulative_map)
+        print("Preparing spatial resources (Porto OSM + population TIFF + activity pools)...")
+        G, gdf_cumulative_p, activity_pools = ensure_spatial_resources("data", generate_cumulative_map)
         print("✓ Spatial resources ready")
     except Exception as e:
         print(f"⚠ Spatial resources setup failed: {e}")
-        G, gdf_cumulative_p = None, None
+        G, gdf_cumulative_p, activity_pools = None, None, None
 
     print(f"\nProcessing {len(imns)} users...")
     print("-" * 40)
-    selected_user_ids = [uid for uid in imns.keys() if uid in poi_data][:10]
+    selected_user_ids = [uid for uid in imns.keys() if uid in poi_data]
     print(f"Processing first {len(selected_user_ids)} users...")
     for idx, uid in enumerate(selected_user_ids, 1):
         print(f"[{idx}/{len(selected_user_ids)}] ")
         try:
-            process_single_user(uid, imns[uid], poi_data[uid], randomness_levels, paths, tz, G, gdf_cumulative_p)
+            process_single_user(uid, imns[uid], poi_data[uid], randomness_levels, paths, tz, G, gdf_cumulative_p, activity_pools)
         except Exception as e:
             print(f"❌ Error processing user {uid}: {e}")
 

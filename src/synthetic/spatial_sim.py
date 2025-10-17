@@ -2,6 +2,7 @@ from typing import Dict, List, Tuple, Any, Optional
 import numpy as np
 from .timelines import find_anchor_stay_for_day
 from ..spatial.mapping import create_trajectory, map_imn_to_osm, select_random_nodes
+from ..spatial.activity_pools import sample_from_activity_pool
 
 
 def simulate_synthetic_trips(
@@ -13,7 +14,25 @@ def simulate_synthetic_trips(
     fixed_home_node: Optional[int] = None,
     fixed_work_node: Optional[int] = None,
     precomputed_map_loc_rmse: Optional[Tuple[Dict[int, int], float]] = None,
+    activity_pools: Optional[Dict[str, List[int]]] = None,
 ) -> Tuple[List[Tuple[float, float, int]], Dict[Any, int], Dict[str, int], float, List[List[Tuple[float, float, int]]]]:
+    """
+    Simulate spatial trips for synthetic stays using activity-aware node pools.
+    
+    Args:
+        imn: Individual Mobility Network
+        synthetic_stays: List of (activity_label, start_rel, end_rel) tuples
+        G: OSM graph
+        gdf_cumulative_p: Population cumulative probability (fallback if activity_pools not provided)
+        randomness: Randomness level
+        fixed_home_node: Optional fixed home node
+        fixed_work_node: Optional fixed work node
+        precomputed_map_loc_rmse: Optional precomputed IMN->OSM mapping
+        activity_pools: Optional activity-aware candidate node pools
+        
+    Returns:
+        Tuple of (trajectory, osm_segments_usage, pseudo_map, rmse, legs_coords)
+    """
     if not synthetic_stays:
         return None, None, None, None, None
     if precomputed_map_loc_rmse is not None:
@@ -31,11 +50,19 @@ def simulate_synthetic_trips(
         elif act_label == 'work' and work_node is not None:
             stay_nodes.append(work_node)
         else:
-            sampled = select_random_nodes(gdf_cumulative_p, n=1, all_nodes=all_nodes)
-            if not sampled:
-                stay_nodes.append(all_nodes[np.random.randint(len(all_nodes))])
+            # Use activity-aware pools if available, otherwise fall back to population grid
+            if activity_pools is not None:
+                sampled = sample_from_activity_pool(act_label, activity_pools, n=1, all_nodes=all_nodes)
+                if sampled:
+                    stay_nodes.append(sampled[0])
+                else:
+                    stay_nodes.append(all_nodes[np.random.randint(len(all_nodes))])
             else:
-                stay_nodes.append(sampled[0])
+                sampled = select_random_nodes(gdf_cumulative_p, n=1, all_nodes=all_nodes)
+                if not sampled:
+                    stay_nodes.append(all_nodes[np.random.randint(len(all_nodes))])
+                else:
+                    stay_nodes.append(sampled[0])
     first_label = str(synthetic_stays[0][0]).lower() if synthetic_stays and synthetic_stays[0][0] is not None else ""
     if len(stay_nodes) > 0 and first_label == 'home' and home_node is not None:
         stay_nodes[0] = home_node
