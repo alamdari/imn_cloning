@@ -131,10 +131,8 @@ def run_pipeline(paths: PathsConfig, randomness_levels: List[float], tz) -> None
 
     print(f"\nProcessing {len(imns)} users...")
     print("-" * 40)
-    selected_user_ids = [uid for uid in imns.keys() if uid in poi_data]
-    print(f"Processing first {len(selected_user_ids)} users...")
-    for idx, uid in enumerate(selected_user_ids, 1):
-        print(f"[{idx}/{len(selected_user_ids)}] ")
+    for idx, uid in enumerate(imns.keys(), 1):
+        print(f"[{idx}/{len(imns)}] ")
         try:
             process_single_user(uid, imns[uid], poi_data[uid], randomness_levels, paths, tz, G, gdf_cumulative_p, activity_pools)
         except Exception as e:

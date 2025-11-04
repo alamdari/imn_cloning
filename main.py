@@ -21,8 +21,15 @@ TIMEZONE = pytz.timezone("Europe/Rome")
 
 
 def main(argv=None):
-    paths = parse_args(argv)
-    # seed optional omitted; user can set via argv and global modules can handle if needed
+    paths, seed = parse_args(argv)
+    
+    # Set random seed for reproducibility
+    if seed is not None:
+        import random
+        random.seed(seed)
+        np.random.seed(seed)
+        print(f"Random seed set to: {seed}")
+    
     run_pipeline(paths, RANDOMNESS_LEVELS, TIMEZONE)
 
 

@@ -7,6 +7,7 @@ import networkx as nx
 from networkx.readwrite import json_graph
 import argparse
 import sys
+import os
 sys.path.append('libs')
 
 from trajectory import Trajectory
@@ -56,6 +57,7 @@ def main_from_code(points_df, output_filename, temporal_thr=1200, spatial_thr=50
     for c in expected_cols:
         if c not in points_df.columns:
             print(f"ERROR: input dataframe does not contain {c} (should have {expected_cols})")
+    
     for uid, user_data in points_df.groupby('id'):
         points = user_data.sort_values(by=['timestamp'])[
             ['longitude','latitude','timestamp']].values.tolist()
@@ -86,10 +88,15 @@ def main():
     parser.add_argument("--temporal_thr", type=int, default=20, help="Temporal threshold in minutes")
     parser.add_argument("--spatial_thr", type=int, default=50, help="Spatial threshold in meters")
     
+    # Optional trajectory saving
+    parser.add_argument("--save_trajectories", type=str, default=None, 
+                       help="Optional: Directory to save segmented trajectories (one file per user)")
+    
     args = parser.parse_args()
 
     input_filename = args.input_filename
     output_filename = args.output_filename
+    save_trajectories = args.save_trajectories
     temporal_thr = args.temporal_thr * 60
     spatial_thr = args.spatial_thr
     
@@ -97,23 +104,38 @@ def main():
     # a user with enough mobility
     min_trajs_no = 2 
 
-    #points_df = pd.read_csv('data/filtered_points_w_header.csv')
     points_df = pd.read_csv(input_filename)
-
     print(points_df.head())
+    print(f"\nProcessing {len(points_df.groupby('id'))} users...")
+    if save_trajectories:
+        os.makedirs(save_trajectories, exist_ok=True)
+        print(f"  → Will save segmented trajectories to: {save_trajectories}/")
+    print()
 
-    #output_filename = 'data/geolife_imns.json.gz'
-
+    user_count = 0
     for uid, user_data in points_df.groupby('id'):
+        user_count += 1
         points = user_data.sort_values(by=['timestamp'])[
             ['longitude','latitude','timestamp']].values.tolist()
         trajs_dict = trajectory_segmenter.segment_trajectories(
             points, int(uid), temporal_thr=temporal_thr, spatial_thr=spatial_thr)
 
+        # Save trajectories if requested (one file per user)
+        if save_trajectories and len(trajs_dict) > min_trajs_no:
+            traj_record = {
+                'uid': int(uid),
+                'num_trajectories': len(trajs_dict),
+                'trajectories': trajs_dict
+            }
+            traj_filename = os.path.join(save_trajectories, f"user_{uid}_trajectories.json")
+            with open(traj_filename, 'w') as fout:
+                json.dump(clear_tuples4json(traj_record), fout, default=agenda_converter)
+
         imh = {'uid': int(uid), 'trajectories': trajs_dict}
-        print(imh)
 
         if len(trajs_dict) <= min_trajs_no:
+            if user_count % 10 == 0:
+                print(f"[{user_count}] User {uid}: {len(trajs_dict)} trajectories (skipped - too few)")
             continue
 
         imn = build_imn(imh)
@@ -124,7 +146,9 @@ def main():
             with gzip.GzipFile(output_filename, 'a') as fout:
                 fout.write(json_bytes)
 
-            print(f"IMN created for {uid} with {len(trajs_dict)} trajectories")
+            print(f"[{user_count}] User {uid}: {len(trajs_dict)} trajectories → IMN created")
+        else:
+            print(f"[{user_count}] User {uid}: {len(trajs_dict)} trajectories → IMN failed")
 
 if __name__ == '__main__':
     main()

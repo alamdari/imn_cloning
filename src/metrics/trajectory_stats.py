@@ -68,7 +68,7 @@ def compute_trip_length(df: pd.DataFrame) -> pd.Series:
         return haversine_distance(first['lat'], first['lon'], 
                                  last['lat'], last['lon'])
     
-    lengths = grouped.apply(get_od_distance)
+    lengths = grouped.apply(get_od_distance, include_groups=False)
     return lengths
 
 
@@ -94,7 +94,7 @@ def compute_trip_path_length(df: pd.DataFrame) -> pd.Series:
                                             coords[i+1][0], coords[i+1][1])
         return total_dist
     
-    path_lengths = grouped.apply(get_path_length)
+    path_lengths = grouped.apply(get_path_length, include_groups=False)
     return path_lengths
 
 
@@ -102,8 +102,12 @@ def extract_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Extract temporal features: start time, hour of day, day of week.
     
+    Handles both Unix timestamps and relative times (seconds from midnight).
+    If timestamps are relative (< 100000), converts using day_date column.
+    
     Args:
         df: DataFrame with columns [trajectory_id, lat, lon, time]
+                Optional: day_date column for relative time conversion
         
     Returns:
         DataFrame with trajectory-level temporal features
@@ -111,6 +115,44 @@ def extract_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     grouped = df.groupby('trajectory_id')
     
     start_times = grouped['time'].min()
+    
+    # Check if timestamps are relative (seconds from midnight) or Unix timestamps
+    # If max time < 100000 (< ~27 hours), it's definitely relative time
+    is_relative_time = start_times.max() < 100000
+    
+    if is_relative_time and 'day_date' in df.columns:
+        # Convert relative times to Unix timestamps using day_date
+        print(f"  → Detected relative timestamps (max={start_times.max():.1f}s), converting using day_date...")
+        # Get first date from day_date column
+        first_date_str = df['day_date'].iloc[0]
+        try:
+            # Parse the date (format: YYYY-MM-DD)
+            reference_date = pd.to_datetime(first_date_str).date()
+            # Get midnight timestamp for reference date
+            reference_midnight = datetime.combine(reference_date, datetime.min.time())
+            reference_ts = int(reference_midnight.timestamp())
+            
+            # Convert each trajectory's relative time to Unix timestamp
+            converted_times = []
+            for traj_id in start_times.index:
+                traj_data = df[df['trajectory_id'] == traj_id]
+                day_str = traj_data['day_date'].iloc[0]
+                day_date = pd.to_datetime(day_str).date()
+                day_midnight = datetime.combine(day_date, datetime.min.time())
+                day_midnight_ts = int(day_midnight.timestamp())
+                
+                relative_time = start_times[traj_id]
+                unix_time = day_midnight_ts + int(relative_time)
+                converted_times.append(unix_time)
+            
+            start_times = pd.Series(converted_times, index=start_times.index)
+            print(f"  ✓ Converted to Unix timestamps (range: {start_times.min()} to {start_times.max()})")
+        except Exception as e:
+            # If conversion fails, use a fixed reference (April 3, 2007)
+            print(f"  ⚠ Warning: Could not parse day_date, using fixed reference date. Error: {e}")
+            reference_ts = 1175587260  # April 3, 2007
+            start_times = start_times + reference_ts
+            print(f"  ✓ Converted using fixed reference (range: {start_times.min()} to {start_times.max()})")
     
     # Convert timestamps to datetime
     dt_series = pd.to_datetime(start_times, unit='s')

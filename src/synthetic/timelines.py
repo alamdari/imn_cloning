@@ -146,6 +146,75 @@ def generate_synthetic_day(original_stays, duration_probs: Dict, transition_prob
         current_time = end_time
         if current_time >= day_length:
             break
+    
+    # Anchor-aware stretching: do not change anchor; extend pre-anchor last stay to
+    # anchor start if needed; extend final non-anchor stay to day end.
+    def _stretch_anchor_aware(
+        stays_rel: List[Tuple[str, int, int]],
+        anchor_tuple: Tuple[str, int, int],
+        total_len: int
+    ) -> List[Tuple[str, int, int]]:
+        """Stretch stays to cover full day while preserving anchor timing."""
+        if not stays_rel:
+            return []
+        # Sort by start time
+        ordered = sorted(stays_rel, key=lambda x: x[1])
+
+        # Identify anchor index if present exactly
+        anchor_idx = None
+        for i, t in enumerate(ordered):
+            if t == anchor_tuple:
+                anchor_idx = i
+                break
+
+        # Ensure the first stay starts at 0 if it's not the anchor
+        out: List[Tuple[str, int, int]] = []
+        act0, s0, e0 = ordered[0]
+        if anchor_idx == 0:
+            # Keep anchor unchanged; do not force start to 0
+            out.append((act0, s0, e0))
+        else:
+            s0 = 0
+            e0 = max(0, min(e0, total_len))
+            if e0 < s0:
+                e0 = s0
+            out.append((act0, s0, e0))
+
+        # Iterate and enforce continuity, preserving anchor start
+        for i in range(1, len(ordered)):
+            act, st, et = ordered[i]
+            st = max(0, min(st, total_len))
+            et = max(0, min(et, total_len))
+            prev_act, prev_st, prev_et = out[-1]
+
+            if anchor_idx is not None and i == anchor_idx:
+                # Do not move anchor start; stretch previous end to anchor start if gap
+                st_fixed = st
+                prev_et = min(max(st_fixed, 0), total_len)
+                out[-1] = (prev_act, prev_st, prev_et)
+                if et < st_fixed:
+                    et = st_fixed
+                out.append((act, st_fixed, et))
+            else:
+                # Force current start to previous end
+                st = prev_et
+                if et < st:
+                    et = st
+                out.append((act, st, et))
+
+        # Stretch last non-anchor stay to day end
+        last_idx = len(out) - 1
+        if anchor_idx is not None and last_idx == anchor_idx:
+            # Do not stretch if anchor is the last; leave as is
+            pass
+        else:
+            last_act, last_st, _ = out[-1]
+            out[-1] = (last_act, last_st, total_len)
+
+        return out
+
+    anchor_tuple = (anchor_stay.activity_label, pert_start, pert_end)
+    synthetic_stays = _stretch_anchor_aware(synthetic_stays, anchor_tuple, day_length)
     return synthetic_stays
 
 

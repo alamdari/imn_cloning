@@ -1602,12 +1602,35 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict,
         if not any_success:
             print("  ⚠ Spatial simulation failed for all days for this user")
         else:
-            # Save combined CSV
+            # Save combined CSV with trajectory_id for each day
             traj_path = os.path.join(paths.results_dir, "synthetic_trajectories", f"user_{user_id}_porto_trajectory.csv")
             os.makedirs(os.path.dirname(traj_path), exist_ok=True)
-            df_traj = pd.DataFrame(combined_traj, columns=["lat", "lon", "time"])
+            
+            # Build DataFrame with trajectory_id (one per day)
+            # Convert relative times to Unix timestamps
+            traj_records = []
+            trajectory_counter = 0
+            for some_day in sorted(per_day_outputs.keys()):
+                # Get midnight timestamp for this day
+                day_midnight = datetime.combine(some_day, datetime.min.time())
+                day_midnight_ts = int(day_midnight.replace(tzinfo=TIMEZONE).timestamp())
+                
+                day_traj = per_day_outputs[some_day]['trajectory']
+                for lat, lon, relative_time in day_traj:
+                    # Convert relative time (seconds from midnight) to Unix timestamp
+                    unix_time = day_midnight_ts + int(relative_time)
+                    traj_records.append({
+                        'trajectory_id': trajectory_counter,
+                        'lat': lat,
+                        'lon': lon,
+                        'time': unix_time,
+                        'day_date': str(some_day)
+                    })
+                trajectory_counter += 1
+            
+            df_traj = pd.DataFrame(traj_records)
             df_traj.to_csv(traj_path, index=False)
-            print(f"  ✓ Spatial trajectory saved (all days combined): {os.path.basename(traj_path)}")
+            print(f"  ✓ Spatial trajectory saved ({trajectory_counter} days/trajectories): {os.path.basename(traj_path)}")
 
             # Generate multi-day interactive map with per-day layers and combined layer
             map_path = os.path.join(paths.results_dir, "synthetic_trajectories", f"user_{user_id}_porto_map.html")

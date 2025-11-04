@@ -40,24 +40,40 @@ def compute_od_matrix(trajectory_stats: pd.DataFrame, grid_size_m: float = 500.0
         grid_size_m: Grid cell size in meters
         
     Returns:
-        DataFrame with columns [origin_cell, dest_cell, trip_count]
+        DataFrame with columns [origin_cell, dest_cell, trip_count, origin_lat, origin_lon, dest_lat, dest_lon]
     """
     od_counts = defaultdict(int)
+    od_coords = {}  # Store representative coordinates for each OD pair
     
     for _, row in trajectory_stats.iterrows():
         origin_cell = assign_to_grid(row['origin_lat'], row['origin_lon'], grid_size_m)
         dest_cell = assign_to_grid(row['dest_lat'], row['dest_lon'], grid_size_m)
-        od_counts[(origin_cell, dest_cell)] += 1
+        od_key = (origin_cell, dest_cell)
+        od_counts[od_key] += 1
+        
+        # Store first occurrence coordinates as representative
+        if od_key not in od_coords:
+            od_coords[od_key] = {
+                'origin_lat': row['origin_lat'],
+                'origin_lon': row['origin_lon'],
+                'dest_lat': row['dest_lat'],
+                'dest_lon': row['dest_lon']
+            }
     
     # Convert to DataFrame
     od_data = []
     for (origin, dest), count in od_counts.items():
+        coords = od_coords[(origin, dest)]
         od_data.append({
             'origin_cell_x': origin[0],
             'origin_cell_y': origin[1],
             'dest_cell_x': dest[0],
             'dest_cell_y': dest[1],
-            'trip_count': count
+            'trip_count': count,
+            'origin_lat': coords['origin_lat'],
+            'origin_lon': coords['origin_lon'],
+            'dest_lat': coords['dest_lat'],
+            'dest_lon': coords['dest_lon']
         })
     
     od_df = pd.DataFrame(od_data)
