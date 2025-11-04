@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""
+Entry point for IMN cloning with temporal + spatial simulation.
+"""
+
+import os
+from typing import Dict, List, Tuple, Any
+
+import numpy as np
+import pandas as pd
+import pytz
+
+from src.io.paths import PathsConfig, parse_args
+from src.synthetic.pipeline import run_pipeline
+
+
+RANDOMNESS_LEVELS = [0.0, 0.25, 0.5, 0.75, 1.0]
+TIMEZONE = pytz.timezone("Europe/Rome")
+
+
+
+def main(argv=None):
+    paths, seed = parse_args(argv)
+    
+    # Set random seed for reproducibility
+    if seed is not None:
+        import random
+        random.seed(seed)
+        np.random.seed(seed)
+        print(f"Random seed set to: {seed}")
+    
+    run_pipeline(paths, RANDOMNESS_LEVELS, TIMEZONE)
+
+
+if __name__ == "__main__":
+    main()
