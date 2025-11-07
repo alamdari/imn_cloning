@@ -51,63 +51,150 @@ def create_trajectory(G, node_origin, node_destination, start_time, weight="trav
     return trajectory, list_seconds[-1], road_segments_osmid
 
 
-def map_imn_to_osm(imn, target_osm, n_trials=10, gdf_cumulative_p=None):
+def map_imn_to_osm(imn, target_osm, n_trials=10, gdf_cumulative_p=None, activity_pools=None, random_seed=None):
+    """
+    Map IMN locations from source city to OSM nodes in target city.
+    
+    Uses activity-aware mapping to preserve both semantic meaning (activity types)
+    and spatial structure (relative distances between locations).
+    
+    Args:
+        imn: Individual Mobility Network with 'locations', 'home', 'work'
+        target_osm: OSM graph of target city
+        n_trials: Number of candidate samples per location
+        gdf_cumulative_p: Population-weighted node sampling (fallback)
+        activity_pools: Dict[activity_label -> List[osm_node_id]] for activity-aware sampling
+        random_seed: Random seed for deterministic results
+        
+    Returns:
+        (map_loc, rmse) where:
+            map_loc: Dict[imn_location_id -> osm_node_id]
+            rmse: Root mean square error of pairwise distance preservation (km)
+    """
     from pandas import DataFrame
+    
+    # Set random seed for deterministic results
+    if random_seed is not None:
+        np.random.seed(random_seed)
+    
     nodes = list(target_osm.nodes())
     if gdf_cumulative_p is None:
         gdf_cumulative_p = DataFrame({"cumulative_p": [1.0], "intersecting_nodes": [nodes]})
-    imn_dist = haversine_distance(
-        imn['locations'][imn['home']]['coordinates'][0],
-        imn['locations'][imn['home']]['coordinates'][1],
-        imn['locations'][imn['work']]['coordinates'][0],
-        imn['locations'][imn['work']]['coordinates'][1],
+    
+    # Helper: get candidate nodes for an activity
+    def get_activity_candidates(activity_label: str, n: int) -> List[int]:
+        """Sample n candidate nodes for given activity type."""
+        if activity_pools and activity_label in activity_pools:
+            pool = activity_pools[activity_label]
+            if pool:
+                # Sample with replacement if needed
+                return [pool[i] for i in np.random.choice(len(pool), size=min(n, len(pool)), replace=False)]
+        # Fallback to population-weighted sampling
+        return select_random_nodes(gdf_cumulative_p, n=n, all_nodes=nodes)
+    
+    # Helper: compute squared distance error between two location pairs
+    def compute_distance_error(imn_loc1, imn_loc2, osm_node1, osm_node2) -> float:
+        """Compute squared error (km²) between IMN distance and OSM distance."""
+        dist_imn = haversine_distance(
+            imn['locations'][imn_loc1]['coordinates'][0],
+            imn['locations'][imn_loc1]['coordinates'][1],
+            imn['locations'][imn_loc2]['coordinates'][0],
+            imn['locations'][imn_loc2]['coordinates'][1],
+        ) / 1000  # Convert to km
+        
+        dist_osm = haversine_distance(
+            target_osm.nodes[osm_node1]['x'],
+            target_osm.nodes[osm_node1]['y'],
+            target_osm.nodes[osm_node2]['x'],
+            target_osm.nodes[osm_node2]['y'],
+        ) / 1000  # Convert to km
+        
+        return (dist_osm - dist_imn) ** 2
+    
+    # Step 1: Map home and work as anchor points
+    home_id = imn['home']
+    work_id = imn['work']
+    
+    # Get home-work distance in source city
+    imn_hw_dist = haversine_distance(
+        imn['locations'][home_id]['coordinates'][0],
+        imn['locations'][home_id]['coordinates'][1],
+        imn['locations'][work_id]['coordinates'][0],
+        imn['locations'][work_id]['coordinates'][1],
     )
-    best_dist = 9e18
-    for _ in range(n_trials):
-        tmp_home_osm = select_random_nodes(gdf_cumulative_p, n=1, all_nodes=nodes)[0]
-        tmp_work_osm = select_random_nodes(gdf_cumulative_p, n=1, all_nodes=nodes)[0]
-        dist = haversine_distance(
-            target_osm.nodes[tmp_home_osm]['x'],
-            target_osm.nodes[tmp_home_osm]['y'],
-            target_osm.nodes[tmp_work_osm]['x'],
-            target_osm.nodes[tmp_work_osm]['y'],
-        )
-        if abs(dist - imn_dist) < abs(best_dist - imn_dist):
-            best_home = tmp_home_osm
-            best_work = tmp_work_osm
-            best_dist = dist
-    map_loc = {imn['home']: best_home, imn['work']: best_work}
-    SE = (best_dist / 1000 - imn_dist / 1000) ** 2
-    for loc in imn['locations'].keys():
-        if loc in map_loc:
-            continue
-        best_dist_loc = 9e18
-        for _ in range(n_trials):
-            tmp_osm = select_random_nodes(gdf_cumulative_p, n=1, all_nodes=nodes)[0]
-            dist_sum = 0
-            for imn_l, osm_l in map_loc.items():
-                dist_osm = haversine_distance(
-                    target_osm.nodes[tmp_osm]['x'],
-                    target_osm.nodes[tmp_osm]['y'],
-                    target_osm.nodes[osm_l]['x'],
-                    target_osm.nodes[osm_l]['y'],
-                )
-                dist_imn = haversine_distance(
-                    imn['locations'][loc]['coordinates'][0],
-                    imn['locations'][loc]['coordinates'][1],
-                    imn['locations'][imn_l]['coordinates'][0],
-                    imn['locations'][imn_l]['coordinates'][1],
-                )
-                dist_sum += (dist_osm/1000 - dist_imn/1000)**2
-            if dist_sum < best_dist_loc:
-                best_osm = tmp_osm
-                best_dist_loc = dist_sum
-        map_loc[loc] = best_osm
-        SE += best_dist_loc
-    if len(map_loc) > 1:
-        rmse = np.sqrt(SE/(len(map_loc)*(len(map_loc)-1)/2))
+    
+    # Sample home candidates
+    home_candidates = get_activity_candidates('home', n_trials * 2)
+    work_candidates = get_activity_candidates('work', n_trials * 2)
+    
+    # Find best home-work pair that preserves their distance
+    best_hw_error = float('inf')
+    best_home = home_candidates[0] if home_candidates else nodes[0]
+    best_work = work_candidates[0] if work_candidates else nodes[1]
+    
+    for home_node in home_candidates[:n_trials]:
+        for work_node in work_candidates[:n_trials]:
+            if home_node == work_node:
+                continue
+            osm_hw_dist = haversine_distance(
+                target_osm.nodes[home_node]['x'],
+                target_osm.nodes[home_node]['y'],
+                target_osm.nodes[work_node]['x'],
+                target_osm.nodes[work_node]['y'],
+            )
+            error = abs(osm_hw_dist - imn_hw_dist)
+            if error < best_hw_error:
+                best_hw_error = error
+                best_home = home_node
+                best_work = work_node
+    
+    # Initialize mapping with home and work
+    map_loc = {home_id: best_home, work_id: best_work}
+    
+    # Track cumulative squared error for RMSE calculation
+    SE = (best_hw_error / 1000) ** 2  # Convert to km and square
+    
+    # Step 2: Map remaining locations incrementally
+    # Sort by frequency (visit more important locations first)
+    remaining_locs = [
+        (loc_id, loc_data) 
+        for loc_id, loc_data in imn['locations'].items() 
+        if loc_id not in map_loc
+    ]
+    remaining_locs.sort(key=lambda x: x[1].get('frequency', 0), reverse=True)
+    
+    for loc_id, loc_data in remaining_locs:
+        activity_label = loc_data.get('activity_label', 'unknown')
+        
+        # Get candidates for this activity type
+        candidates = get_activity_candidates(activity_label, n_trials)
+        
+        # Find best candidate that preserves distances to already mapped locations
+        best_error = float('inf')
+        best_node = candidates[0] if candidates else nodes[np.random.randint(len(nodes))]
+        
+        for candidate_node in candidates:
+            # Compute total squared error against all already-mapped locations
+            total_error = 0.0
+            for mapped_loc_id, mapped_osm_node in map_loc.items():
+                total_error += compute_distance_error(loc_id, mapped_loc_id, candidate_node, mapped_osm_node)
+            
+            if total_error < best_error:
+                best_error = total_error
+                best_node = candidate_node
+        
+        map_loc[loc_id] = best_node
+        SE += best_error
+    
+    # Step 3: Compute RMSE
+    # RMSE = sqrt(sum of squared errors / number of location pairs)
+    num_locations = len(map_loc)
+    if num_locations > 1:
+        num_pairs = num_locations * (num_locations - 1) / 2
+        rmse = np.sqrt(SE / num_pairs)
     else:
-        rmse = 0
+        rmse = 0.0
+    
     return map_loc, rmse
 
 

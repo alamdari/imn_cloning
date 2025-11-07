@@ -36,10 +36,16 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_leve
     print("  ↳ Running spatial simulation in Porto (synthetic stays, all days)...")
     chosen_r = randomness_levels[2] if len(randomness_levels) > 2 else randomness_levels[0]
     from src.spatial.mapping import map_imn_to_osm
-    map_loc_imn_user, rmse_user = map_imn_to_osm(enriched, G, gdf_cumulative_p=gdf_cumulative_p)
+    map_loc_imn_user, rmse_user = map_imn_to_osm(
+        enriched, 
+        G, 
+        gdf_cumulative_p=gdf_cumulative_p,
+        activity_pools=activity_pools,
+        random_seed=user_id  # Use user_id as seed for deterministic but unique mapping
+    )
     fixed_home = map_loc_imn_user.get(enriched['home'])
     fixed_work = map_loc_imn_user.get(enriched['work'])
-    print(f"  ↳ rmse for user {user_id}: {rmse_user} - mapping: {map_loc_imn_user}")
+    print(f"  ↳ RMSE for user {user_id}: {rmse_user:.2f} km")
 
     per_day_outputs: Dict[Any, Dict[str, Any]] = {}
     combined_traj: List[Tuple[int, float, float, int]] = []
@@ -92,7 +98,7 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_leve
     # Also create original-city map based on IMN coordinates
     try:
         orig_map_path = os.path.join(paths.results_dir, "synthetic_trajectories", f"user_{user_id}_original_city_map.html")
-        generate_interactive_original_city_map(user_id, enriched, stays_by_day, orig_map_path)
+        generate_interactive_original_city_map(user_id, enriched, stays_by_day, orig_map_path, tz=tz)
         print(f"  ✓ Original-city map saved: {os.path.basename(orig_map_path)}")
         # Create split view combining original-city and Porto maps
         try:

@@ -132,6 +132,7 @@ def prepare_test_data(force_reload: bool = False) -> Dict:
         'enriched_imns': enriched_imns,
         'G': G,
         'gdf_cumulative_p': gdf_cumulative_p,
+        'activity_pools': activity_pools,
         'user_ids': sorted(enriched_imns.keys()),
     }
     
@@ -215,6 +216,8 @@ def visualize_mapping(user_id: int, enriched_imn: Dict, map_loc_imn: Dict, rmse:
         </style>
         <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css"/>
         <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet-measure@3.1.0/dist/leaflet-measure.css"/>
+        <script src="https://cdn.jsdelivr.net/npm/leaflet-measure@3.1.0/dist/leaflet-measure.min.js"></script>
     </head>
     <body>
         <div class="header">
@@ -240,12 +243,30 @@ def visualize_mapping(user_id: int, enriched_imn: Dict, map_loc_imn: Dict, rmse:
                 opacity: 0.5
             }}).addTo(mapOriginal);
             
+            // Add distance measurement tool to original map
+            var measureControlOriginal = new L.Control.Measure({{
+                primaryLengthUnit: 'kilometers',
+                secondaryLengthUnit: 'meters',
+                primaryAreaUnit: 'sqkilometers',
+                secondaryAreaUnit: 'sqmeters'
+            }});
+            measureControlOriginal.addTo(mapOriginal);
+            
             // Porto Map
             var mapPorto = L.map('map-porto').setView([{porto_center[0]}, {porto_center[1]}], 13);
             L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
                 attribution: '© OpenStreetMap contributors',
                 opacity: 0.5
             }}).addTo(mapPorto);
+            
+            // Add distance measurement tool to Porto map
+            var measureControlPorto = new L.Control.Measure({{
+                primaryLengthUnit: 'kilometers',
+                secondaryLengthUnit: 'meters',
+                primaryAreaUnit: 'sqkilometers',
+                secondaryAreaUnit: 'sqmeters'
+            }});
+            measureControlPorto.addTo(mapPorto);
             
             // Add original locations
     """
@@ -258,7 +279,7 @@ def visualize_mapping(user_id: int, enriched_imn: Dict, map_loc_imn: Dict, rmse:
         
         # Determine color using same palette as maps.py
         color_map = {
-            'home': 'skyblue', 'work': 'orange', 'eat': 'green', 'utility': 'purple', 
+            'home': 'darkblue', 'work': 'orange', 'eat': 'green', 'utility': 'purple', 
             'transit': 'red', 'unknown': 'gray', 'school': 'yellow', 'shop': 'pink', 
             'leisure': 'lightgreen', 'health': 'lightcoral', 'admin': 'lightblue', 'finance': 'gold'
         }
@@ -327,6 +348,7 @@ def test_map_imn_to_osm(data: Dict):
     enriched_imns = data['enriched_imns']
     G = data['G']
     gdf_cumulative_p = data['gdf_cumulative_p']
+    activity_pools = data.get('activity_pools')
     user_ids = data['user_ids']
     
     results = {}
@@ -335,13 +357,27 @@ def test_map_imn_to_osm(data: Dict):
         print(f"\n[{idx}/{len(user_ids)}] Processing user {user_id}...")
         enriched = enriched_imns[user_id]
         
-        # Call the function we're testing
+        # Call the function we're testing with activity pools and random seed
         try:
-            map_loc_imn, rmse = map_imn_to_osm(enriched, G, gdf_cumulative_p=gdf_cumulative_p)
+            map_loc_imn, rmse = map_imn_to_osm(
+                enriched, 
+                G, 
+                n_trials=10,
+                gdf_cumulative_p=gdf_cumulative_p,
+                activity_pools=activity_pools,
+                random_seed=RANDOM_SEED + user_id  # Unique but deterministic seed per user
+            )
             print(f"  ✓ Mapping complete - RMSE: {rmse:.2f} km")
             print(f"  ✓ Mapped {len(map_loc_imn)} locations")
             print(f"    Home: {enriched['home']} → OSM node {map_loc_imn.get(enriched['home'])}")
             print(f"    Work: {enriched['work']} → OSM node {map_loc_imn.get(enriched['work'])}")
+            
+            # Show activity breakdown
+            activity_counts = {}
+            for loc_id in enriched['locations']:
+                act = enriched['locations'][loc_id].get('activity_label', 'unknown')
+                activity_counts[act] = activity_counts.get(act, 0) + 1
+            print(f"    Activities: {dict(sorted(activity_counts.items()))}")
             
             # Store results
             results[user_id] = {
@@ -381,6 +417,14 @@ def test_map_imn_to_osm(data: Dict):
         f.write(f"  Median RMSE: {np.median(rmses):.2f} km\n")
         f.write(f"  Min RMSE: {np.min(rmses):.2f} km\n")
         f.write(f"  Max RMSE: {np.max(rmses):.2f} km\n")
+        f.write(f"  Std Dev: {np.std(rmses):.2f} km\n")
+        
+        f.write(f"\nAlgorithm Details:\n")
+        f.write(f"  - Activity-aware mapping using activity pools\n")
+        f.write(f"  - Home and work mapped first as anchor points\n")
+        f.write(f"  - Other locations mapped incrementally by frequency\n")
+        f.write(f"  - Preserves spatial structure (pairwise distances)\n")
+        f.write(f"  - Deterministic with random_seed={RANDOM_SEED}\n")
     
     print(f"\n✓ Results summary saved: {summary_path}")
     print(f"✓ All visualizations saved to: {RESULTS_DIR}")
