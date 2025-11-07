@@ -10,7 +10,7 @@ class PathsConfig:
     results_dir: str = './results'
     prob_subdir: str = 'user_probability_reports'
     vis_subdir: str = 'user_timeline_visualizations'
-    num_users: int = 100  # Number of users to randomly sample for processing
+    num_users: int = None  # Number of users to randomly sample (None = all users)
 
     def prob_dir(self) -> str:
         return os.path.join(self.results_dir, self.prob_subdir)
@@ -32,7 +32,7 @@ def parse_args(argv=None) -> PathsConfig:
     parser.add_argument('--results-dir', default=None, help='Base directory for results.')
     parser.add_argument('--prob-subdir', default=None, help='Probability reports subdirectory.')
     parser.add_argument('--vis-subdir', default=None, help='Timeline visualizations subdirectory.')
-    parser.add_argument('--num-users', type=int, default=None, help='Number of users to randomly sample (default: 100).')
+    parser.add_argument('--num-users', type=int, default=None, help='Number of users to randomly sample (default: all users).')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility (default: 42).')
     args = parser.parse_args(argv)
 

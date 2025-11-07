@@ -33,12 +33,18 @@ def load_datasets(paths, results_dir_cache: str = None) -> Tuple[Dict, Dict]:
     common_users = set(full_imns.keys()) & set(poi_data.keys())
     print(f"  ✓ Found {len(common_users)} users with both IMN and POI data")
     
-    # Randomly sample num_users
-    if len(common_users) > paths.num_users:
+    # Randomly sample num_users or use all users
+    if paths.num_users is None:
+        # Process all users
+        sampled_user_ids = sorted(common_users)
+        print(f"  → Processing ALL {len(sampled_user_ids)} users (no sampling)")
+    elif len(common_users) > paths.num_users:
+        # Sample requested number
         sampled_user_ids = random.sample(sorted(common_users), paths.num_users)
         print(f"  → Randomly sampled {paths.num_users} users for processing")
     else:
-        sampled_user_ids = list(common_users)
+        # Use all available users (fewer than requested)
+        sampled_user_ids = sorted(common_users)
         print(f"  → Using all {len(sampled_user_ids)} users (fewer than requested {paths.num_users})")
     
     # Filter to selected users
