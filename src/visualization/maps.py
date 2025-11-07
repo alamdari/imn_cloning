@@ -63,12 +63,12 @@ def generate_interactive_porto_map_multi(user_id: int, per_day_data: Dict, G, ou
             """
             if act in ("home", "work"):
                 if node not in added_hw_nodes:
-                    folium.CircleMarker([node_lat, node_lon], radius=7, color=marker_color, fill=True, fill_color=marker_color,
-                                        fill_opacity=0.95, weight=2, popup=folium.Popup(popup_html, max_width=300), tooltip=f"{act}").add_to(static_hw)
+                    folium.CircleMarker([node_lat, node_lon], radius=8, color='white', fill=True, fill_color=marker_color,
+                                        fill_opacity=0.8, weight=2, opacity=1, popup=folium.Popup(popup_html, max_width=300), tooltip=f"{act}").add_to(static_hw)
                     added_hw_nodes.add(node)
             else:
-                folium.CircleMarker([node_lat, node_lon], radius=6, color=marker_color, fill=True, fill_color=marker_color,
-                                    fill_opacity=0.9, weight=2, popup=folium.Popup(popup_html, max_width=300), tooltip=f"{act}").add_to(fg)
+                folium.CircleMarker([node_lat, node_lon], radius=6, color='white', fill=True, fill_color=marker_color,
+                                    fill_opacity=0.8, weight=2, opacity=1, popup=folium.Popup(popup_html, max_width=300), tooltip=f"{act}").add_to(fg)
 
         fg.add_to(m)
 
@@ -120,8 +120,10 @@ def generate_interactive_original_city_map(user_id: int, enriched_imn: Dict, sta
             <b>IMN frequency:</b> {loc.get('frequency', '-')}
         </div>
         """
-        folium.CircleMarker([lat, lon], radius=6, color=marker_color, fill=True, fill_color=marker_color,
-                            fill_opacity=0.9, weight=2, popup=folium.Popup(popup_html, max_width=300), tooltip=f"{act}").add_to(m)
+        # Use radius 8 for home/work, 6 for others
+        radius = 8 if act in ('home', 'work') else 6
+        folium.CircleMarker([lat, lon], radius=radius, color='white', fill=True, fill_color=marker_color,
+                            fill_opacity=0.8, weight=2, opacity=1, popup=folium.Popup(popup_html, max_width=300), tooltip=f"{act}").add_to(m)
 
     import os
     os.makedirs(os.path.dirname(out_html_path), exist_ok=True)
