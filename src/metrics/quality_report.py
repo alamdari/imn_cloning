@@ -196,6 +196,13 @@ def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m:
     all_user_stats = {}
     all_trajectories = []
     
+    # Check if we need to convert relative timestamps
+    first_user_df = next(iter(user_trajectories.values()))
+    if 'time' in first_user_df.columns:
+        max_time = first_user_df['time'].max()
+        if max_time < 100000 and 'day_date' in first_user_df.columns:
+            print(f"  → Detected relative timestamps, converting using day_date column...")
+    
     for user_id, traj_df in user_trajectories.items():
         stats = compute_trajectory_statistics(traj_df)
         stats['user_id'] = user_id

@@ -34,7 +34,8 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_leve
         print(f"  ⚠ Failed to save timeline visualization for user {user_id}: {e}")
 
     print("  ↳ Running spatial simulation in Porto (synthetic stays, all days)...")
-    chosen_r = randomness_levels[2] if len(randomness_levels) > 2 else randomness_levels[0]
+    # Use the configured spatial randomness level
+    chosen_r = paths.spatial_randomness
     from src.spatial.mapping import map_imn_to_osm
     map_loc_imn_user, rmse_user = map_imn_to_osm(
         enriched, 
@@ -48,7 +49,7 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_leve
     print(f"  ↳ RMSE for user {user_id}: {rmse_user:.2f} km")
 
     per_day_outputs: Dict[Any, Dict[str, Any]] = {}
-    combined_traj: List[Tuple[int, float, float, int]] = []
+    combined_traj: List[Tuple[int, float, float, int, str]] = []
     any_success = False
     trajectory_id = 0
     for some_day, ddata in day_data.items():
@@ -68,10 +69,16 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_leve
             print(f"  ⚠ Spatial simulation failed for user {user_id} on day {some_day}")
             continue
         any_success = True
-        trajectory_id += 1
-        # Add trajectory_id to each point (trajectory_id, lat, lon, time)
-        traj_with_id = [(trajectory_id, lat, lon, time) for lat, lon, time in traj]
-        combined_traj.extend(traj_with_id)
+        
+        # Split into separate trajectories per trip (using legs_coords)
+        # Each leg is one trip between two stays
+        day_date_str = str(some_day)
+        for leg in legs_coords:
+            if leg:  # Skip empty legs
+                trajectory_id += 1
+                traj_with_id = [(trajectory_id, lat, lon, time, day_date_str) for lat, lon, time in leg]
+                combined_traj.extend(traj_with_id)
+        
         per_day_outputs[some_day] = {
             'trajectory': traj,
             'pseudo_map_loc': pseudo_map_loc,
@@ -85,7 +92,7 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_leve
 
     traj_path = os.path.join(paths.results_dir, "synthetic_trajectories", f"user_{user_id}_porto_trajectory.csv")
     os.makedirs(os.path.dirname(traj_path), exist_ok=True)
-    pd.DataFrame(combined_traj, columns=["trajectory_id", "lat", "lon", "time"]).to_csv(traj_path, index=False)
+    pd.DataFrame(combined_traj, columns=["trajectory_id", "lat", "lon", "time", "day_date"]).to_csv(traj_path, index=False)
     print(f"  ✓ Spatial trajectory saved (all days combined): {os.path.basename(traj_path)}")
 
     map_path = os.path.join(paths.results_dir, "synthetic_trajectories", f"user_{user_id}_porto_map.html")
@@ -121,6 +128,18 @@ def run_pipeline(paths: PathsConfig, randomness_levels: List[float], tz) -> None
     print(f"  - User probability reports: {paths.results_dir}/{paths.prob_subdir}/")
     print(f"  - Timeline visualizations: {paths.results_dir}/{paths.vis_subdir}/")
     print()
+    
+    # Validate and display randomness configuration
+    if not (0.0 <= paths.spatial_randomness <= 1.0):
+        print(f"⚠ Warning: spatial_randomness={paths.spatial_randomness} is outside [0.0, 1.0] range")
+        print(f"  Clamping to valid range...")
+        paths.spatial_randomness = max(0.0, min(1.0, paths.spatial_randomness))
+    
+    print(f"Randomness Configuration:")
+    print(f"  - Temporal: using all levels {randomness_levels}")
+    print(f"  - Spatial: using randomness = {paths.spatial_randomness}")
+    print(f"Target City: {paths.target_city.upper()}")
+    print()
 
     try:
         imns, poi_data = load_datasets(paths)
@@ -129,8 +148,8 @@ def run_pipeline(paths: PathsConfig, randomness_levels: List[float], tz) -> None
         return
 
     try:
-        print("Preparing spatial resources (Porto OSM + population TIFF + activity pools)...")
-        G, gdf_cumulative_p, activity_pools = ensure_spatial_resources("data", generate_cumulative_map)
+        print(f"Preparing spatial resources for {paths.target_city.upper()} (OSM graph + population + activity pools)...")
+        G, gdf_cumulative_p, activity_pools = ensure_spatial_resources("data", generate_cumulative_map, target_city=paths.target_city)
         print("✓ Spatial resources ready")
     except Exception as e:
         print(f"⚠ Spatial resources setup failed: {e}")

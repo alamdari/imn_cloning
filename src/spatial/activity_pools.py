@@ -68,7 +68,7 @@ AMENITY_TO_ACTIVITY = {
 }
 
 
-def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "data") -> Dict[str, List[int]]:
+def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "data", city_name: str = "porto") -> Dict[str, List[int]]:
     """
     Build activity-aware candidate node pools based on OSM amenities.
     
@@ -79,6 +79,7 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
         G: OSMnx graph
         proximity_m: Maximum distance in meters from amenity to consider a node
         cache_dir: Directory to cache intermediate amenity GeoDataFrames
+        city_name: Name of the city for cache file naming
         
     Returns:
         Dictionary mapping activity labels to lists of candidate OSM node IDs
@@ -98,8 +99,8 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
     
     # Cache paths for amenity GeoDataFrames
     os.makedirs(cache_dir, exist_ok=True)
-    amenities_cache = os.path.join(cache_dir, "porto_amenities.pkl")
-    amenities_geojson = os.path.join(cache_dir, "porto_amenities.geojson")
+    amenities_cache = os.path.join(cache_dir, f"{city_name}_amenities.pkl")
+    amenities_geojson = os.path.join(cache_dir, f"{city_name}_amenities.geojson")
     
     # MINIMAL AMENITY QUERY: Only essential types for fast prototyping
     print("    Will query minimal essential amenity types (fast mode)")
@@ -160,18 +161,28 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
             for amenity_type in amenity_list:
                 amenity_type_to_activity[amenity_type] = activity_label
         
-        # For each amenity, find nearby nodes (with progress)
-        print(f"    Processing {len(gdf_amenities)} amenities to find nearby nodes...")
-        processed = 0
-        last_progress = 0
-        for idx, amenity in gdf_amenities.iterrows():
+        # For each amenity, find nearby nodes (PARALLELIZED)
+        print(f"    Processing {len(gdf_amenities)} amenities to find nearby nodes (parallelized)...")
+        
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import multiprocessing as mp
+        
+        # Prepare data for parallel processing
+        amenity_rows = list(gdf_amenities.iterrows())
+        
+        # Use ThreadPoolExecutor (G is not pickleable for ProcessPoolExecutor)
+        max_workers = min(mp.cpu_count(), 8)  # Limit to 8 threads to avoid overhead
+        
+        def process_amenity_thread(amenity_row):
+            """Process amenity in thread (can access G directly)."""
+            idx, amenity = amenity_row
             amenity_type = amenity.get('amenity')
             if not amenity_type:
-                continue
+                return None
             
             activity_label = amenity_type_to_activity.get(amenity_type, 'unknown')
             if activity_label == 'unknown':
-                continue
+                return None
             
             # Get amenity centroid
             try:
@@ -179,9 +190,10 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
                 centroid = geom.centroid
                 amenity_lat, amenity_lon = centroid.y, centroid.x
             except Exception:
-                continue
+                return None
             
             # Find nodes within proximity
+            nearby_nodes_found = set()
             try:
                 nearby_nodes = ox.nearest_nodes(G, amenity_lon, amenity_lat, return_dist=False)
                 if isinstance(nearby_nodes, (list, tuple)):
@@ -189,33 +201,48 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
                         node_data = G.nodes[node]
                         dist = ox.distance.great_circle(amenity_lat, amenity_lon, node_data['y'], node_data['x'])
                         if dist <= proximity_m:
-                            activity_pools[activity_label].add(node)
+                            nearby_nodes_found.add(node)
                 else:
                     # Single node
                     node_data = G.nodes[nearby_nodes]
                     dist = ox.distance.great_circle(amenity_lat, amenity_lon, node_data['y'], node_data['x'])
                     if dist <= proximity_m:
-                        activity_pools[activity_label].add(nearby_nodes)
+                        nearby_nodes_found.add(nearby_nodes)
             except Exception:
                 pass
             
-            # Progress indicator (every 10%)
-            processed += 1
-            progress = int((processed / len(gdf_amenities)) * 100)
-            if progress >= last_progress + 10:
-                print(f"      {progress}% complete ({processed}/{len(gdf_amenities)} amenities)")
-                last_progress = progress
+            return (activity_label, nearby_nodes_found)
         
-        print(f"    ✓ Processed all {len(gdf_amenities)} amenities")
+        # Process in parallel with progress tracking
+        processed = 0
+        last_progress = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(process_amenity_thread, row): row for row in amenity_rows}
+            
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    activity_label, nearby_nodes = result
+                    for node in nearby_nodes:
+                        activity_pools[activity_label].add(node)
+                
+                # Progress indicator (every 10%)
+                processed += 1
+                progress = int((processed / len(gdf_amenities)) * 100)
+                if progress >= last_progress + 10:
+                    print(f"      {progress}% complete ({processed}/{len(gdf_amenities)} amenities)")
+                    last_progress = progress
+        
+        print(f"    ✓ Processed all {len(gdf_amenities)} amenities (parallelized with {max_workers} threads)")
                 
     except Exception as e:
         print(f"    ⚠ Failed to query amenities: {e}")
     
     # Query landuse for home and work (with caching)
-    residential_cache = os.path.join(cache_dir, "porto_residential.pkl")
-    residential_geojson = os.path.join(cache_dir, "porto_residential.geojson")
-    work_cache = os.path.join(cache_dir, "porto_work.pkl")
-    work_geojson = os.path.join(cache_dir, "porto_work.geojson")
+    residential_cache = os.path.join(cache_dir, f"{city_name}_residential.pkl")
+    residential_geojson = os.path.join(cache_dir, f"{city_name}_residential.geojson")
+    work_cache = os.path.join(cache_dir, f"{city_name}_work.pkl")
+    work_geojson = os.path.join(cache_dir, f"{city_name}_work.geojson")
     
     try:
         # Home: residential areas

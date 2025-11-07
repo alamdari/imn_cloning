@@ -35,13 +35,16 @@ from src.visualization.maps import generate_interactive_porto_map_multi, generat
 
 # Configuration
 RANDOMNESS_LEVELS = [0.0, 0.25, 0.5, 0.75, 1.0]
+SPATIAL_RANDOMNESS = 0.5  # Default spatial randomness level
+TARGET_CITY = 'porto'  # Default target city
 TIMEZONE = pytz.timezone("Europe/Rome")
 CACHE_DIR = "results/cache"
 CACHE_FILE = os.path.join(CACHE_DIR, "test_single_user_cache.pkl")
 
 
 def process_user(user_id: int, imn: Dict, poi_info: Dict, randomness_levels: List[float], 
-                 results_dir: str, tz, G, gdf_cumulative_p, activity_pools: Dict[str, List[int]]) -> None:
+                 results_dir: str, tz, G, gdf_cumulative_p, activity_pools: Dict[str, List[int]], 
+                 spatial_randomness: float = 0.5) -> None:
     """Process a single user with full pipeline."""
     print(f"\n{'=' * 60}")
     print(f"Processing user {user_id}")
@@ -140,7 +143,8 @@ def process_user(user_id: int, imn: Dict, poi_info: Dict, randomness_levels: Lis
     if enriched.get('work') not in enriched.get('locations', {}):
         print(f"   ⚠ ERROR: Work '{enriched.get('work')}' not in enriched locations!")
     
-    chosen_r = randomness_levels[2] if len(randomness_levels) > 2 else randomness_levels[0]
+    # Use the configured spatial randomness level
+    chosen_r = spatial_randomness
     
     try:
         map_loc_imn_user, rmse_user = map_imn_to_osm(
@@ -172,9 +176,9 @@ def process_user(user_id: int, imn: Dict, poi_info: Dict, randomness_levels: Lis
         return
     
     # Run spatial simulation for all days
-    print("\n6. Running spatial simulation in Porto...")
+    print(f"\n6. Running spatial simulation in {TARGET_CITY.upper()}...")
     per_day_outputs: Dict[Any, Dict[str, Any]] = {}
-    combined_traj: List[Tuple[int, float, float, int]] = []
+    combined_traj: List[Tuple[int, float, float, int, str]] = []
     trajectory_id = 0
     
     for day_idx, (some_day, ddata) in enumerate(day_data.items(), 1):
@@ -196,9 +200,13 @@ def process_user(user_id: int, imn: Dict, poi_info: Dict, randomness_levels: Lis
             print(f"   ⚠ Spatial simulation failed for day {some_day}")
             continue
         
-        trajectory_id += 1
-        traj_with_id = [(trajectory_id, lat, lon, time) for lat, lon, time in traj]
-        combined_traj.extend(traj_with_id)
+        # Split into separate trajectories per trip (using legs_coords)
+        day_date_str = str(some_day)
+        for leg in legs_coords:
+            if leg:  # Skip empty legs
+                trajectory_id += 1
+                traj_with_id = [(trajectory_id, lat, lon, time, day_date_str) for lat, lon, time in leg]
+                combined_traj.extend(traj_with_id)
         
         per_day_outputs[some_day] = {
             'trajectory': traj,
@@ -207,7 +215,7 @@ def process_user(user_id: int, imn: Dict, poi_info: Dict, randomness_levels: Lis
             'legs_coords': legs_coords,
         }
         
-        print(f"   ✓ Day {day_idx}/{len(day_data)}: {some_day} - {len(traj)} trajectory points")
+        print(f"   ✓ Day {day_idx}/{len(day_data)}: {some_day} - {len(legs_coords)} trips, {len(traj)} total points")
     
     if not per_day_outputs:
         print("   ⚠ Spatial simulation failed for all days")
@@ -215,18 +223,18 @@ def process_user(user_id: int, imn: Dict, poi_info: Dict, randomness_levels: Lis
     
     # Save trajectory CSV
     import pandas as pd
-    traj_path = os.path.join(traj_dir, f"user_{user_id}_porto_trajectory.csv")
-    pd.DataFrame(combined_traj, columns=["trajectory_id", "lat", "lon", "time"]).to_csv(traj_path, index=False)
-    print(f"\n7. Saved Porto trajectory: {traj_path}")
+    traj_path = os.path.join(traj_dir, f"user_{user_id}_{TARGET_CITY}_trajectory.csv")
+    pd.DataFrame(combined_traj, columns=["trajectory_id", "lat", "lon", "time", "day_date"]).to_csv(traj_path, index=False)
+    print(f"\n7. Saved {TARGET_CITY.upper()} trajectory: {traj_path}")
     
-    # Generate Porto map
+    # Generate target city map
     print("\n8. Generating interactive maps...")
-    porto_map_path = os.path.join(traj_dir, f"user_{user_id}_porto_map.html")
+    target_map_path = os.path.join(traj_dir, f"user_{user_id}_{TARGET_CITY}_map.html")
     try:
-        generate_interactive_porto_map_multi(user_id, per_day_outputs, G, porto_map_path)
-        print(f"   ✓ Porto map: {porto_map_path}")
+        generate_interactive_porto_map_multi(user_id, per_day_outputs, G, target_map_path)
+        print(f"   ✓ {TARGET_CITY.capitalize()} map: {target_map_path}")
     except Exception as e:
-        print(f"   ⚠ Failed to create Porto map: {e}")
+        print(f"   ⚠ Failed to create {TARGET_CITY} map: {e}")
     
     # Generate original city map with trajectories
     try:
@@ -237,8 +245,8 @@ def process_user(user_id: int, imn: Dict, poi_info: Dict, randomness_levels: Lis
         # Create split view
         split_path = os.path.join(traj_dir, f"user_{user_id}_split_map.html")
         left_rel = os.path.basename(orig_map_path)
-        right_rel = os.path.basename(porto_map_path)
-        create_split_map_html("Original IMN (Milano)", left_rel, "Simulated Trajectory (Porto)", right_rel, split_path)
+        right_rel = os.path.basename(target_map_path)
+        create_split_map_html("Original IMN (Source City)", left_rel, f"Simulated Trajectory ({TARGET_CITY.capitalize()})", right_rel, split_path)
         print(f"   ✓ Split map: {split_path}")
     except Exception as e:
         print(f"   ⚠ Failed to create original city map: {e}")
@@ -249,7 +257,7 @@ def process_user(user_id: int, imn: Dict, poi_info: Dict, randomness_levels: Lis
     print(f"Results saved to: {results_dir}")
 
 
-def load_cached_data(force_reload: bool = False):
+def load_cached_data(force_reload: bool = False, target_city: str = 'porto'):
     """Load and cache IMN data, POI data, and spatial resources."""
     import pickle
     
@@ -278,8 +286,8 @@ def load_cached_data(force_reload: bool = False):
     print(f"   ✓ Loaded POI data for {len(poi_data_all)} users")
     
     # Load spatial resources
-    print("\n2. Loading spatial resources (Porto OSM + population + activity pools)...")
-    G, gdf_cumulative_p, activity_pools = ensure_spatial_resources("data", generate_cumulative_map)
+    print(f"\n2. Loading spatial resources for {target_city.upper()} (OSM + population + activity pools)...")
+    G, gdf_cumulative_p, activity_pools = ensure_spatial_resources("data", generate_cumulative_map, target_city=target_city)
     print(f"   ✓ Spatial resources ready")
     print(f"   ✓ OSM graph has {len(G.nodes())} nodes and {len(G.edges())} edges")
     print(f"   ✓ Activity pools available for: {len(activity_pools)} activities")
@@ -321,6 +329,10 @@ Examples:
     parser.add_argument('user_id', type=int, help='User ID to process')
     parser.add_argument('--results-dir', type=str, default=None, 
                        help='Results directory (default: results/single_user_<USER_ID>)')
+    parser.add_argument('--target-city', type=str, default='porto', choices=['porto', 'milan'],
+                       help='Target city for spatial simulation (default: porto)')
+    parser.add_argument('--spatial-randomness', type=float, default=0.5,
+                       help='Spatial randomness level 0.0-1.0 (default: 0.5)')
     parser.add_argument('--force-reload', action='store_true',
                        help='Force reload data from source files (ignore cache)')
     
@@ -328,12 +340,19 @@ Examples:
     user_id = args.user_id
     results_dir = args.results_dir if args.results_dir else f"results/single_user_{user_id}"
     
+    # Update global config
+    global TARGET_CITY, SPATIAL_RANDOMNESS
+    TARGET_CITY = args.target_city
+    SPATIAL_RANDOMNESS = args.spatial_randomness
+    
     print("=" * 60)
     print(f"Single User Processing: User {user_id}")
+    print(f"Target City: {TARGET_CITY.upper()}")
+    print(f"Spatial Randomness: {SPATIAL_RANDOMNESS}")
     print("=" * 60)
     
     # Load data (cached or fresh)
-    cached_data = load_cached_data(force_reload=args.force_reload)
+    cached_data = load_cached_data(force_reload=args.force_reload, target_city=TARGET_CITY)
     
     full_imns = cached_data['full_imns']
     poi_data_all = cached_data['poi_data_all']
@@ -365,7 +384,8 @@ Examples:
         TIMEZONE,
         G,
         gdf_cumulative_p,
-        activity_pools
+        activity_pools,
+        spatial_randomness=SPATIAL_RANDOMNESS
     )
     
     print(f"\n{'=' * 60}")

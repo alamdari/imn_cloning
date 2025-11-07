@@ -122,7 +122,6 @@ def extract_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     
     if is_relative_time and 'day_date' in df.columns:
         # Convert relative times to Unix timestamps using day_date
-        print(f"  → Detected relative timestamps (max={start_times.max():.1f}s), converting using day_date...")
         # Get first date from day_date column
         first_date_str = df['day_date'].iloc[0]
         try:
@@ -146,13 +145,11 @@ def extract_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
                 converted_times.append(unix_time)
             
             start_times = pd.Series(converted_times, index=start_times.index)
-            print(f"  ✓ Converted to Unix timestamps (range: {start_times.min()} to {start_times.max()})")
         except Exception as e:
             # If conversion fails, use a fixed reference (April 3, 2007)
             print(f"  ⚠ Warning: Could not parse day_date, using fixed reference date. Error: {e}")
             reference_ts = 1175587260  # April 3, 2007
             start_times = start_times + reference_ts
-            print(f"  ✓ Converted using fixed reference (range: {start_times.min()} to {start_times.max()})")
     
     # Convert timestamps to datetime
     dt_series = pd.to_datetime(start_times, unit='s')

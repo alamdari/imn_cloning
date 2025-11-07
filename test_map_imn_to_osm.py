@@ -38,6 +38,7 @@ RESULTS_DIR = TEST_DATA_DIR
 NUM_RANDOM_USERS = 10
 SPECIFIC_USER = 302397
 RANDOM_SEED = 42
+TARGET_CITY = 'porto'  # Target city for testing
 
 
 def load_test_users(imn_path: str, poi_path: str) -> Tuple[Dict, Dict]:
@@ -114,9 +115,9 @@ def prepare_test_data(force_reload: bool = False) -> Dict:
         "data/milano_2007_full_imns_pois.json.gz"
     )
     
-    # Prepare spatial resources (Porto)
-    print("\nPreparing spatial resources (Porto OSM + population)...")
-    G, gdf_cumulative_p, activity_pools = ensure_spatial_resources("data", generate_cumulative_map)
+    # Prepare spatial resources
+    print(f"\nPreparing spatial resources for {TARGET_CITY.upper()} (OSM + population + activity pools)...")
+    G, gdf_cumulative_p, activity_pools = ensure_spatial_resources("data", generate_cumulative_map, target_city=TARGET_CITY)
     print("  ✓ Spatial resources ready")
     
     # Enrich IMNs with POI activity labels
@@ -230,8 +231,8 @@ def visualize_mapping(user_id: int, enriched_imn: Dict, map_loc_imn: Dict, rmse:
                 <div id="map-original"></div>
             </div>
             <div class="map-pane">
-                <div class="map-title">Mapped Locations (Porto)</div>
-                <div id="map-porto"></div>
+                <div class="map-title">Mapped Locations ({TARGET_CITY.capitalize()})</div>
+                <div id="map-target"></div>
             </div>
         </div>
         
@@ -252,21 +253,21 @@ def visualize_mapping(user_id: int, enriched_imn: Dict, map_loc_imn: Dict, rmse:
             }});
             measureControlOriginal.addTo(mapOriginal);
             
-            // Porto Map
-            var mapPorto = L.map('map-porto').setView([{porto_center[0]}, {porto_center[1]}], 13);
+            // Target City Map
+            var mapTarget = L.map('map-target').setView([{porto_center[0]}, {porto_center[1]}], 13);
             L.tileLayer('https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png', {{
                 attribution: '© OpenStreetMap contributors',
                 opacity: 0.5
-            }}).addTo(mapPorto);
+            }}).addTo(mapTarget);
             
-            // Add distance measurement tool to Porto map
-            var measureControlPorto = new L.Control.Measure({{
+            // Add distance measurement tool to target map
+            var measureControlTarget = new L.Control.Measure({{
                 primaryLengthUnit: 'kilometers',
                 secondaryLengthUnit: 'meters',
                 primaryAreaUnit: 'sqkilometers',
                 secondaryAreaUnit: 'sqmeters'
             }});
-            measureControlPorto.addTo(mapPorto);
+            measureControlTarget.addTo(mapTarget);
             
             // Add original locations
     """
@@ -316,7 +317,7 @@ def visualize_mapping(user_id: int, enriched_imn: Dict, map_loc_imn: Dict, rmse:
                 weight: 2,
                 opacity: 1,
                 fillOpacity: 0.8
-            }}).addTo(mapPorto).bindPopup(
+            }}).addTo(mapTarget).bindPopup(
                 '<b>Location {loc_id} (mapped)</b><br>' +
                 'Activity: {activity}<br>' +
                 'OSM Node: {porto_node}<br>' +
