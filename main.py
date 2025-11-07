@@ -9,6 +9,7 @@ from typing import Dict, List, Tuple, Any
 import numpy as np
 import pandas as pd
 import pytz
+import random
 
 from src.io.paths import PathsConfig, parse_args
 from src.synthetic.pipeline import run_pipeline
@@ -24,7 +25,6 @@ def main(argv=None):
     
     # Set random seed for reproducibility
     if seed is not None:
-        import random
         random.seed(seed)
         np.random.seed(seed)
         print(f"Random seed set to: {seed}")

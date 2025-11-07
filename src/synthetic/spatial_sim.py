@@ -1,7 +1,6 @@
 from typing import Dict, List, Tuple, Any, Optional
 import numpy as np
-from .timelines import find_anchor_stay_for_day
-from ..spatial.mapping import create_trajectory, map_imn_to_osm, select_random_nodes
+from ..spatial.mapping import create_trajectory
 from ..spatial.activity_pools import sample_from_activity_pool
 
 
@@ -17,40 +16,65 @@ def simulate_synthetic_trips(
     activity_pools: Optional[Dict[str, List[int]]] = None,
 ) -> Tuple[List[Tuple[float, float, int]], Dict[Any, int], Dict[str, int], float, List[List[Tuple[float, float, int]]]]:
     """
-    Simulate spatial trips for synthetic stays using activity-aware node pools.
+    Simulate spatial trips for synthetic stays using precomputed IMN→OSM mapping.
+    
+    Spatializes a synthetic temporal timeline by assigning OSM nodes to each stay
+    and connecting them via real road-network trajectories.
     
     Args:
         imn: Individual Mobility Network
         synthetic_stays: List of (activity_label, start_rel, end_rel) tuples
         G: OSM graph
-        gdf_cumulative_p: Population cumulative probability (fallback if activity_pools not provided)
-        randomness: Randomness level
+        gdf_cumulative_p: Population cumulative probability (unused, kept for compatibility)
+        randomness: Randomness level (used as random seed for reproducibility)
         fixed_home_node: Optional fixed home node
         fixed_work_node: Optional fixed work node
-        precomputed_map_loc_rmse: Optional precomputed IMN->OSM mapping
-        activity_pools: Optional activity-aware candidate node pools
+        precomputed_map_loc_rmse: Required precomputed IMN→OSM mapping (map_loc_imn, rmse)
+        activity_pools: Optional activity-aware candidate node pools for new activities
         
     Returns:
         Tuple of (trajectory, osm_segments_usage, pseudo_map, rmse, legs_coords)
     """
     if not synthetic_stays:
         return None, None, None, None, None
-    if precomputed_map_loc_rmse is not None:
-        map_loc_imn, rmse = precomputed_map_loc_rmse
-    else:
-        map_loc_imn, rmse = map_imn_to_osm(imn, G, gdf_cumulative_p=gdf_cumulative_p)
+    
+    # Use precomputed mapping (required)
+    if precomputed_map_loc_rmse is None:
+        raise ValueError("precomputed_map_loc_rmse must be provided")
+    
+    map_loc_imn, rmse = precomputed_map_loc_rmse
+    
+    # Set random seed for reproducibility
+    if randomness is not None:
+        np.random.seed(int(randomness * 10000))
+    
+    # Get fixed home and work nodes
     home_node = fixed_home_node if fixed_home_node is not None else map_loc_imn.get(imn['home'])
     work_node = fixed_work_node if fixed_work_node is not None else map_loc_imn.get(imn['work'])
     all_nodes = list(G.nodes())
+    
+    # Assign OSM nodes to each stay
     stay_nodes: List[int] = []
     for idx, (act, st, et) in enumerate(synthetic_stays):
         act_label = str(act).lower() if act is not None else "unknown"
+        
+        # Priority 1: Home activity → use fixed_home_node
         if act_label == 'home' and home_node is not None:
             stay_nodes.append(home_node)
+        # Priority 2: Work activity → use fixed_work_node
         elif act_label == 'work' and work_node is not None:
             stay_nodes.append(work_node)
+        # Priority 3: Check if activity corresponds to an existing IMN location
+        elif act in imn.get('locations', {}):
+            # Activity is an IMN location ID → use the precomputed mapping
+            mapped_node = map_loc_imn.get(act)
+            if mapped_node is not None:
+                stay_nodes.append(mapped_node)
+            else:
+                # Shouldn't happen if precomputed mapping is complete, but fallback
+                stay_nodes.append(all_nodes[np.random.randint(len(all_nodes))])
         else:
-            # Use activity-aware pools if available, otherwise fall back to population grid
+            # Priority 4: New activity not in IMN → sample once from activity pools
             if activity_pools is not None:
                 sampled = sample_from_activity_pool(act_label, activity_pools, n=1, all_nodes=all_nodes)
                 if sampled:
@@ -58,62 +82,65 @@ def simulate_synthetic_trips(
                 else:
                     stay_nodes.append(all_nodes[np.random.randint(len(all_nodes))])
             else:
-                sampled = select_random_nodes(gdf_cumulative_p, n=1, all_nodes=all_nodes)
-                if not sampled:
-                    stay_nodes.append(all_nodes[np.random.randint(len(all_nodes))])
-                else:
-                    stay_nodes.append(sampled[0])
-    first_label = str(synthetic_stays[0][0]).lower() if synthetic_stays and synthetic_stays[0][0] is not None else ""
-    if len(stay_nodes) > 0 and first_label == 'home' and home_node is not None:
-        stay_nodes[0] = home_node
-    anchor_idx = None
-    max_dur = -1
-    for idx, (act, st, et) in enumerate(synthetic_stays):
-        if act == 'home':
-            continue
-        dur = max(0, (et or 0) - (st or 0))
-        if dur > max_dur:
-            max_dur = dur
-            anchor_idx = idx
-    stays_mut = [ [act, int(st), int(e)] for (act, st, e) in synthetic_stays ]
+                # No activity pools available → random fallback
+                stay_nodes.append(all_nodes[np.random.randint(len(all_nodes))])
+    
+    # Create mutable copy of stays for local time adjustments
+    stays_mut = [[act, int(st), int(et)] for (act, st, et) in synthetic_stays]
+    
+    # Build trajectories between consecutive stays
     trajectory: List[Tuple[float, float, int]] = []
     osm_segments_usage: Dict[Any, int] = {}
     legs_coords: List[List[Tuple[float, float, int]]] = []
+    
     for i in range(len(stays_mut) - 1):
         act_from, st_from, et_from = stays_mut[i]
         act_to, st_to, et_to = stays_mut[i + 1]
         origin_node = stay_nodes[i]
         dest_node = stay_nodes[i + 1]
+        
+        # Compute available gap between stays
         allocated_gap = max(0, st_to - et_from)
-        trip_start_time = et_from
-        shortest_p, duration_p, osm_segments = create_trajectory(G, origin_node, dest_node, trip_start_time, use_cache=True)
+        departure_time = et_from  # Trip starts when previous stay ends
+        
+        # Create trajectory on road network
+        shortest_p, duration_p, osm_segments = create_trajectory(
+            G, origin_node, dest_node, departure_time, use_cache=True
+        )
+        
         if shortest_p is None:
             continue
+        
+        # Handle travel time adjustments locally
         if duration_p > allocated_gap:
-            delta = int(duration_p - allocated_gap)
-            if i == anchor_idx:
-                stays_mut[i + 1][1] += delta
-            elif i + 1 == anchor_idx:
-                stays_mut[i][2] = max(st_from, et_from - delta)
-                trip_start_time = stays_mut[i][2]
-            else:
-                stays_mut[i][2] = max(st_from, et_from - delta)
-                trip_start_time = stays_mut[i][2]
-            shortest_p, duration_p, osm_segments = create_trajectory(G, origin_node, dest_node, trip_start_time, use_cache=True)
+            # Travel time exceeds gap → shorten previous stay's end time
+            excess = int(duration_p - allocated_gap)
+            stays_mut[i][2] = max(st_from, et_from - excess)
+            departure_time = stays_mut[i][2]  # New departure time (end of shortened stay)
+            
+            # Compute arrival time: arrival_time = departure_time + duration_p
+            arrival_time = departure_time + duration_p
+            stays_mut[i + 1][1] = arrival_time  # Update next stay's start to arrival time
+            
+            # Recompute trajectory with adjusted departure time
+            shortest_p, duration_p, osm_segments = create_trajectory(
+                G, origin_node, dest_node, departure_time, use_cache=True
+            )
+            
             if shortest_p is None:
                 continue
-        else:
-            slack = int(allocated_gap - duration_p)
-            trip_start_time = et_from + slack
-            stays_mut[i][2] = trip_start_time
-            shortest_p, duration_p, osm_segments = create_trajectory(G, origin_node, dest_node, trip_start_time, use_cache=True)
-            if shortest_p is None:
-                continue
+        
+        # Add trajectory leg
         trajectory.extend(shortest_p)
         legs_coords.append(shortest_p)
+        
+        # Track OSM segment usage
         for oss in osm_segments:
             osm_segments_usage[oss] = osm_segments_usage.get(oss, 0) + 1
-    pseudo_map = { i: node for i, node in enumerate(stay_nodes) }
+    
+    # Create pseudo_map: stay index → OSM node ID
+    pseudo_map = {i: node for i, node in enumerate(stay_nodes)}
+    
     return trajectory, osm_segments_usage, pseudo_map, rmse, legs_coords
 
 

@@ -4,7 +4,7 @@ import json
 import pickle
 import random
 from typing import Dict, Tuple
-import imn_loading
+from src.io import imn_loading
 
 
 def read_poi_data(filepath: str) -> Dict[int, Dict]:

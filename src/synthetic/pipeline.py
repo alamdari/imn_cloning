@@ -39,6 +39,7 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_leve
     map_loc_imn_user, rmse_user = map_imn_to_osm(enriched, G, gdf_cumulative_p=gdf_cumulative_p)
     fixed_home = map_loc_imn_user.get(enriched['home'])
     fixed_work = map_loc_imn_user.get(enriched['work'])
+    print(f"  ↳ rmse for user {user_id}: {rmse_user} - mapping: {map_loc_imn_user}")
 
     per_day_outputs: Dict[Any, Dict[str, Any]] = {}
     combined_traj: List[Tuple[int, float, float, int]] = []
@@ -118,7 +119,7 @@ def run_pipeline(paths: PathsConfig, randomness_levels: List[float], tz) -> None
     try:
         imns, poi_data = load_datasets(paths)
     except Exception as e:
-        print(f"❌ Error loading data: {e}")
+        print(f"!! Error loading data: {e}")
         return
 
     try:
@@ -136,10 +137,9 @@ def run_pipeline(paths: PathsConfig, randomness_levels: List[float], tz) -> None
         try:
             process_single_user(uid, imns[uid], poi_data[uid], randomness_levels, paths, tz, G, gdf_cumulative_p, activity_pools)
         except Exception as e:
-            print(f"❌ Error processing user {uid}: {e}")
+            print(f"!! Error processing user {uid}: {e}")
 
     print("\n" + "=" * 60)
     print("Processing complete!")
     print(f"Results saved to: {paths.results_dir}")
-
-
+    
