@@ -422,7 +422,9 @@ def plot_od_pairs_interactive_map(trajectory_stats: pd.DataFrame, od_matrix: pd.
 
 def plot_distribution_comparison(synthetic_stats: pd.DataFrame, 
                                  original_stats: Optional[pd.DataFrame],
-                                 output_dir: str):
+                                 output_dir: str,
+                                 source_city: str = 'milan',
+                                 target_city: str = 'porto'):
     """
     Create side-by-side comparison plots of synthetic vs original distributions.
     
@@ -430,6 +432,8 @@ def plot_distribution_comparison(synthetic_stats: pd.DataFrame,
         synthetic_stats: Statistics from synthetic trajectories
         original_stats: Statistics from original trajectories (if available)
         output_dir: Directory to save comparison plots directly to output_dir
+        source_city: Source city name (e.g., 'milan') for plot titles
+        target_city: Target city name (e.g., 'porto') for plot titles
     """
     if original_stats is None or original_stats.empty:
         print("  ⚠ No original data for comparison")
@@ -453,7 +457,7 @@ def plot_distribution_comparison(synthetic_stats: pd.DataFrame,
     ax2.hist(syn_dur_min, bins=50, edgecolor='black', alpha=0.7, color='green')
     ax2.set_xlabel('Trip Duration (minutes)', fontsize=12)
     ax2.set_ylabel('Frequency', fontsize=12)
-    ax2.set_title('Target City (Porto) - Trip Duration', fontsize=14, fontweight='bold')
+    ax2.set_title(f'Target City ({target_city.upper()}) - Trip Duration', fontsize=14, fontweight='bold')
     ax2.axvline(syn_dur_min.mean(), color='red', linestyle='--', 
                 label=f'Mean: {syn_dur_min.mean():.1f} min')
     ax2.legend()
@@ -482,7 +486,7 @@ def plot_distribution_comparison(synthetic_stats: pd.DataFrame,
     ax2.hist(syn_len_km, bins=50, edgecolor='black', alpha=0.7, color='green')
     ax2.set_xlabel('Trip Length (km)', fontsize=12)
     ax2.set_ylabel('Frequency', fontsize=12)
-    ax2.set_title('Target City (Porto) - Trip Length', fontsize=14, fontweight='bold')
+    ax2.set_title(f'Target City ({target_city.upper()}) - Trip Length', fontsize=14, fontweight='bold')
     ax2.axvline(syn_len_km.mean(), color='red', linestyle='--', 
                 label=f'Mean: {syn_len_km.mean():.2f} km')
     ax2.legend()
@@ -509,7 +513,7 @@ def plot_distribution_comparison(synthetic_stats: pd.DataFrame,
                 edgecolor='black', alpha=0.7, color='green')
         ax2.set_xlabel('Hour of Day', fontsize=12)
         ax2.set_ylabel('Number of Trips', fontsize=12)
-        ax2.set_title('Target City (Porto) - Temporal Distribution', fontsize=14, fontweight='bold')
+        ax2.set_title(f'Target City ({target_city.upper()}) - Temporal Distribution', fontsize=14, fontweight='bold')
         ax2.set_xticks(range(0, 24, 2))
         ax2.grid(True, alpha=0.3, axis='y')
         
@@ -517,4 +521,70 @@ def plot_distribution_comparison(synthetic_stats: pd.DataFrame,
         plt.savefig(os.path.join(output_dir, 'temporal_comparison.png'), dpi=300, bbox_inches='tight')
         plt.close()
         print(f"  ✓ Saved: temporal_comparison.png")
+
+
+def plot_path_metrics_comparison(original_metrics: pd.DataFrame, synthetic_metrics: pd.DataFrame,
+                                 output_dir: str):
+    """
+    Create side-by-side comparison plots for path metrics.
+    
+    Args:
+        original_metrics: DataFrame with original trajectory path metrics
+        synthetic_metrics: DataFrame with synthetic trajectory path metrics
+        output_dir: Directory to save plots
+    """
+    print("  Generating path metrics comparison plots...")
+    
+    # Plot each metric
+    metrics_to_plot = [
+        ('straight_line_distance', 'Straight-Line Distance', 'meters'),
+        ('actual_path_length', 'Actual Path Length', 'meters'),
+        ('shortest_path_length', 'Shortest Path Length', 'meters'),
+        ('detour_ratio', 'Detour Ratio', 'ratio'),
+        ('efficiency', 'Path Efficiency', 'ratio'),
+    ]
+    
+    for metric_name, metric_label, unit in metrics_to_plot:
+        if metric_name not in original_metrics.columns or metric_name not in synthetic_metrics.columns:
+            continue
+        
+        # Skip if all values are NaN
+        if original_metrics[metric_name].isna().all() and synthetic_metrics[metric_name].isna().all():
+            continue
+        
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+        
+        # Original distribution
+        orig_data = original_metrics[metric_name].dropna()
+        if len(orig_data) > 0:
+            ax1.hist(orig_data, bins=50, edgecolor='black', alpha=0.7, color='blue')
+            mean_val = orig_data.mean()
+            ax1.axvline(mean_val, color='red', linestyle='--', 
+                       label=f'Mean: {mean_val:.3f}')
+            ax1.legend()
+        
+        ax1.set_xlabel(f'{metric_label} ({unit})', fontsize=12)
+        ax1.set_ylabel('Frequency', fontsize=12)
+        ax1.set_title(f'Original City - {metric_label}', fontsize=14, fontweight='bold')
+        ax1.grid(True, alpha=0.3)
+        
+        # Synthetic distribution
+        syn_data = synthetic_metrics[metric_name].dropna()
+        if len(syn_data) > 0:
+            ax2.hist(syn_data, bins=50, edgecolor='black', alpha=0.7, color='green')
+            mean_val = syn_data.mean()
+            ax2.axvline(mean_val, color='red', linestyle='--', 
+                       label=f'Mean: {mean_val:.3f}')
+            ax2.legend()
+        
+        ax2.set_xlabel(f'{metric_label} ({unit})', fontsize=12)
+        ax2.set_ylabel('Frequency', fontsize=12)
+        ax2.set_title(f'Target City (Synthetic) - {metric_label}', fontsize=14, fontweight='bold')
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        output_path = os.path.join(output_dir, f'path_metrics_{metric_name}_comparison.png')
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"    ✓ Saved: path_metrics_{metric_name}_comparison.png")
 

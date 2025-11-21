@@ -6,10 +6,13 @@ import os
 import json
 import gzip
 import pandas as pd
-from typing import Dict, List
+import numpy as np
+import networkx as nx
+import osmnx as ox
+from typing import Dict, List, Optional
 from pathlib import Path
 
-from .trajectory_stats import compute_trajectory_statistics
+from .trajectory_stats import compute_trajectory_statistics, haversine_distance
 from .spatial_stats import (
     compute_od_matrix, 
     compute_origin_density, 
@@ -26,6 +29,7 @@ from .visualizations import (
     plot_origin_density_interactive_map,
     plot_od_pairs_interactive_map,
     plot_distribution_comparison,
+    plot_path_metrics_comparison,
 )
 
 
@@ -165,8 +169,141 @@ def load_all_user_trajectories(trajectories_dir: str, limit_users: int = None) -
     return user_trajectories
 
 
+def compute_shortest_path_length(G, origin_lat: float, origin_lon: float, 
+                                 dest_lat: float, dest_lon: float) -> Optional[float]:
+    """
+    Compute shortest path length on OSM graph between two GPS coordinates.
+    
+    Args:
+        G: OSM graph
+        origin_lat, origin_lon: Origin coordinates
+        dest_lat, dest_lon: Destination coordinates
+        
+    Returns:
+        Shortest path length in meters, or None if no path found
+    """
+    try:
+        # Find nearest nodes
+        origin_node = ox.distance.nearest_nodes(G, origin_lon, origin_lat)
+        dest_node = ox.distance.nearest_nodes(G, dest_lon, dest_lat)
+        
+        if origin_node == dest_node:
+            return 0.0
+        
+        # Compute shortest path by length
+        try:
+            path = nx.shortest_path(G, origin_node, dest_node, weight='length')
+        except nx.NetworkXNoPath:
+            return None
+        
+        # Compute total path length using OSMnx route_to_gdf
+        try:
+            gdf_route = ox.routing.route_to_gdf(G, path)
+            return gdf_route['length'].sum()
+        except Exception:
+            # Fallback: compute manually
+            total_length = 0.0
+            for i in range(len(path) - 1):
+                edge_data = G[path[i]][path[i+1]]
+                if isinstance(edge_data, dict):
+                    length = edge_data.get('length', 0.0)
+                else:
+                    length = list(edge_data.values())[0].get('length', 0.0) if edge_data else 0.0
+                total_length += length
+            return total_length
+    except Exception:
+        return None
+
+
+def compute_path_metrics(df: pd.DataFrame, G, trajectory_type: str = "unknown") -> pd.DataFrame:
+    """
+    Compute path metrics for all trips in a trajectory DataFrame.
+    
+    Args:
+        df: DataFrame with columns [trajectory_id, lat, lon, time]
+        G: OSM graph for computing shortest paths (can be None)
+        trajectory_type: Label for the trajectory type ("original" or "synthetic")
+        
+    Returns:
+        DataFrame with metrics for each trip
+    """
+    grouped = df.groupby('trajectory_id')
+    metrics = []
+    total_trips = len(grouped)
+    
+    # For synthetic trajectories, actual path IS shortest path (no need to recompute)
+    is_synthetic = trajectory_type.lower() == "synthetic"
+    
+    print(f"  Computing path metrics for {total_trips} {trajectory_type} trips...")
+    if is_synthetic:
+        print(f"    (Skipping shortest path computation - synthetic trajectories already use shortest paths)")
+    
+    for idx, (traj_id, group) in enumerate(grouped, 1):
+        if idx % 100 == 0 and total_trips > 100:
+            print(f"    Progress: {idx}/{total_trips} trips processed...")
+        
+        if len(group) < 2:
+            continue
+        
+        # Get origin and destination
+        origin = group.iloc[0]
+        dest = group.iloc[-1]
+        origin_lat, origin_lon = origin['lat'], origin['lon']
+        dest_lat, dest_lon = dest['lat'], dest['lon']
+        
+        # 1. Straight-line distance (OD distance)
+        straight_line_dist = haversine_distance(origin_lat, origin_lon, dest_lat, dest_lon)
+        
+        # 2. Actual path length (sum of all segments)
+        coords = group[['lat', 'lon']].values
+        actual_path_length = 0.0
+        for i in range(len(coords) - 1):
+            actual_path_length += haversine_distance(
+                coords[i][0], coords[i][1],
+                coords[i+1][0], coords[i+1][1]
+            )
+        
+        # 3. Shortest path length on OSM graph
+        if is_synthetic:
+            # For synthetic: actual path IS shortest path (already computed during generation)
+            shortest_path_length = actual_path_length
+        elif G is not None:
+            # For original: need to compute shortest path on OSM graph
+            shortest_path_length = compute_shortest_path_length(
+                G, origin_lat, origin_lon, dest_lat, dest_lon
+            )
+        else:
+            shortest_path_length = None
+        
+        # Derived metrics
+        # Always compute efficiency (doesn't require shortest path)
+        efficiency = (straight_line_dist / actual_path_length 
+                     if actual_path_length > 0 else np.nan)
+        
+        # Detour ratio: actual_path / shortest_path
+        # For synthetic: should be 1.0 (actual = shortest)
+        # For original: shows how much detour from shortest path
+        detour_ratio = (actual_path_length / shortest_path_length 
+                       if shortest_path_length is not None and shortest_path_length > 0 
+                       else np.nan)
+        
+        # Always append metrics, even if shortest path failed
+        # This ensures we compute actual_path_length and efficiency for all trips
+        metrics.append({
+            'trajectory_id': traj_id,
+            'straight_line_distance': straight_line_dist,
+            'actual_path_length': actual_path_length,
+            'shortest_path_length': shortest_path_length if shortest_path_length is not None else np.nan,
+            'detour_ratio': detour_ratio,
+            'efficiency': efficiency,
+        })
+    
+    return pd.DataFrame(metrics)
+
+
 def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m: float = 500.0, 
-                           original_trajectories_dir: str = None):
+                           original_trajectories_dir: str = None,
+                           source_city: str = 'milan', target_city: str = 'porto'):
     """
     Generate comprehensive quality evaluation report for synthetic trajectories.
     
@@ -175,6 +312,8 @@ def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m:
         output_dir: Path to save metrics and plots
         grid_size_m: Grid cell size for spatial aggregation (meters)
         original_trajectories_dir: Optional path to original trajectories for comparison
+        source_city: Source city name (e.g., 'milan') for original trajectory timezone
+        target_city: Target city name (e.g., 'porto') for synthetic trajectory timezone
     """
     print("\n" + "="*60)
     print("SYNTHETIC TRAJECTORY QUALITY EVALUATION")
@@ -204,7 +343,8 @@ def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m:
             print(f"  → Detected relative timestamps, converting using day_date column...")
     
     for user_id, traj_df in user_trajectories.items():
-        stats = compute_trajectory_statistics(traj_df)
+        # Use target_city timezone for synthetic trajectories
+        stats = compute_trajectory_statistics(traj_df, city_name=target_city)
         stats['user_id'] = user_id
         all_user_stats[user_id] = stats
         all_trajectories.append(stats)
@@ -276,6 +416,7 @@ def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m:
     
     # Load and compare with original data if provided
     original_stats = None
+    original_user_trajs_combined = {}  # Initialize for path metrics computation
     if original_trajectories_dir:
         print(f"\nLoading original trajectories from: {original_trajectories_dir}")
         print(f"  → Only loading users that exist in synthetic data (matching {len(user_trajectories)} users)")
@@ -323,10 +464,15 @@ def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m:
             if original_user_trajs:
                 print("Computing original trajectory statistics...")
                 original_traj_list = []
+                # Store original_user_trajs for path metrics computation later
+                original_user_trajs_combined = {}
                 for user_id, traj_df in original_user_trajs.items():
-                    stats = compute_trajectory_statistics(traj_df)
+                    # Use source_city timezone for original trajectories
+                    stats = compute_trajectory_statistics(traj_df, city_name=source_city)
                     stats['user_id'] = user_id
                     original_traj_list.append(stats)
+                    # Store combined DataFrame for path metrics
+                    original_user_trajs_combined[user_id] = traj_df
                 original_stats = pd.concat(original_traj_list, ignore_index=True)
                 print(f"✓ Computed statistics for {len(original_stats)} original trajectories")
                 
@@ -336,13 +482,15 @@ def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m:
                 print(f"✓ Saved original statistics: {os.path.basename(orig_stats_path)}")
         except Exception as e:
             print(f"⚠ Could not load original trajectories: {e}")
+            original_user_trajs_combined = {}
     
     # Generate visualizations (all as comparisons if original data available)
     print("\nGenerating visualizations...")
     
     if original_stats is not None:
         print("  Generating comparison plots (Original vs Synthetic)...")
-        plot_distribution_comparison(combined_stats, original_stats, output_dir)
+        plot_distribution_comparison(combined_stats, original_stats, output_dir, 
+                                    source_city=source_city, target_city=target_city)
     else:
         print("  Generating synthetic-only plots (no original data for comparison)...")
         plot_trip_duration_distribution(
@@ -392,6 +540,91 @@ def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m:
         top_n=20
     )
     
+    # Generate path metrics diagnosis if both original and synthetic trajectories are available
+    if original_trajectories_dir is not None and original_stats is not None and len(original_user_trajs_combined) > 0:
+        print("\nGenerating path metrics diagnosis...")
+        try:
+            # Load OSM graphs for shortest path computation
+            from src.spatial.resources import ensure_spatial_resources
+            from src.population.utils import generate_cumulative_map
+            
+            print("  Loading OSM graphs for path metrics computation...")
+            # Use source city graph for original trajectories
+            G_source, _, _ = ensure_spatial_resources("data", generate_cumulative_map, target_city=source_city)
+            print(f"  ✓ {source_city.upper()} OSM graph loaded (for original trajectories)")
+            
+            # Use target city graph for synthetic trajectories
+            G_target, _, _ = ensure_spatial_resources("data", generate_cumulative_map, target_city=target_city)
+            print(f"  ✓ {target_city.upper()} OSM graph loaded (for synthetic trajectories)")
+            
+            # Combine all trajectories for path metrics computation
+            # Make trajectory_id globally unique by combining with user_id
+            original_dfs = []
+            for user_id, df in original_user_trajs_combined.items():
+                df_copy = df.copy()
+                # Create globally unique trajectory_id: user_id * 1000000 + trajectory_id
+                df_copy['trajectory_id'] = user_id * 1000000 + df_copy['trajectory_id']
+                original_dfs.append(df_copy)
+            original_df = pd.concat(original_dfs, ignore_index=True)
+            
+            synthetic_dfs = []
+            for user_id, df in user_trajectories.items():
+                df_copy = df.copy()
+                # Create globally unique trajectory_id: user_id * 1000000 + trajectory_id
+                df_copy['trajectory_id'] = user_id * 1000000 + df_copy['trajectory_id']
+                synthetic_dfs.append(df_copy)
+            synthetic_df = pd.concat(synthetic_dfs, ignore_index=True)
+            
+            print(f"  Original trajectories: {len(original_df)} points, {original_df['trajectory_id'].nunique()} trips")
+            print(f"  Synthetic trajectories: {len(synthetic_df)} points, {synthetic_df['trajectory_id'].nunique()} trips")
+            
+            # Compute path metrics for both original and synthetic trajectories
+            original_path_metrics = compute_path_metrics(original_df, G_source, "original")
+            synthetic_path_metrics = compute_path_metrics(synthetic_df, G_target, "synthetic")
+            
+            # Save metrics to CSV
+            original_path_metrics.to_csv(
+                os.path.join(output_dir, 'original_path_metrics.csv'), index=False
+            )
+            synthetic_path_metrics.to_csv(
+                os.path.join(output_dir, 'synthetic_path_metrics.csv'), index=False
+            )
+            print("  ✓ Saved path metrics to CSV files")
+            
+            # Generate comparison plots
+            plot_path_metrics_comparison(
+                original_path_metrics, synthetic_path_metrics, output_dir
+            )
+            
+            # Print summary statistics
+            print("\n  Path Metrics Summary:")
+            print(f"    Processed trips:")
+            print(f"      Original: {len(original_path_metrics)} trips")
+            print(f"      Synthetic: {len(synthetic_path_metrics)} trips")
+            
+            if not original_path_metrics['detour_ratio'].isna().all():
+                print(f"\n    Detour Ratio (actual_path / shortest_path):")
+                print(f"      Original - Mean: {original_path_metrics['detour_ratio'].mean():.3f}, "
+                      f"Median: {original_path_metrics['detour_ratio'].median():.3f}")
+                print(f"      Synthetic - Mean: {synthetic_path_metrics['detour_ratio'].mean():.3f}, "
+                      f"Median: {synthetic_path_metrics['detour_ratio'].median():.3f}")
+            else:
+                print(f"\n    ⚠ Detour ratio not available (shortest path computation failed for all trips)")
+            
+            print(f"\n    Path Efficiency (straight_line / actual_path):")
+            print(f"      Original - Mean: {original_path_metrics['efficiency'].mean():.3f}, "
+                  f"Median: {original_path_metrics['efficiency'].median():.3f}")
+            print(f"      Synthetic - Mean: {synthetic_path_metrics['efficiency'].mean():.3f}, "
+                  f"Median: {synthetic_path_metrics['efficiency'].median():.3f}")
+            
+            print(f"\n    Note: 'straight_line_distance' should match 'od_distance_meters' in length_comparison.png")
+            print(f"          'actual_path_length' is the sum of all GPS segments (always >= straight_line_distance)")
+            
+        except Exception as e:
+            print(f"  ⚠ Path metrics diagnosis failed: {e}")
+            import traceback
+            traceback.print_exc()
+    
     print("\n" + "="*60)
     print("QUALITY EVALUATION COMPLETE")
     print("="*60)
@@ -400,6 +633,9 @@ def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m:
     print(f"  - trajectory_statistics.csv (synthetic)")
     if original_stats is not None:
         print(f"  - original_trajectory_statistics.csv")
+    if len(original_user_trajs_combined) > 0:
+        print(f"  - original_path_metrics.csv")
+        print(f"  - synthetic_path_metrics.csv")
     print(f"  - od_matrix.csv")
     print(f"  - origin_density.csv")
     print(f"  - destination_density.csv")
@@ -422,6 +658,13 @@ def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m:
     print(f"    - trip_length_boxplot.png")
     print(f"    - day_of_week_distribution.png")
     print(f"    - path_vs_od_distance.png")
+    if len(original_user_trajs_combined) > 0:
+        print(f"  Path Metrics Comparison Plots:")
+        print(f"    - path_metrics_straight_line_distance_comparison.png")
+        print(f"    - path_metrics_actual_path_length_comparison.png")
+        print(f"    - path_metrics_shortest_path_length_comparison.png")
+        print(f"    - path_metrics_detour_ratio_comparison.png")
+        print(f"    - path_metrics_efficiency_comparison.png")
     
     print(f"\nInteractive Maps:")
     print(f"  - origin_density_map.html (heatmap + toggleable markers)")

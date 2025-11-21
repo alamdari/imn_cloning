@@ -16,18 +16,41 @@ class Stay:
 
 
 def read_stays_from_trips(trips: List[Tuple], locations: Dict) -> List[Stay]:
+    """
+    Extract stays from trips.
+    
+    Creates stays at both the origin of the first trip and destinations of all trips.
+    This ensures we capture the initial location (e.g., home) before the first trip.
+    """
     stays = []
+    
+    if not trips:
+        return stays
+    
+    # Create stay at origin of first trip (from trip start time)
+    first_from_id, first_to_id, first_st, first_et = trips[0]
+    first_from_label = locations[first_from_id].get('activity_label', 'unknown')
+    first_origin_stay = Stay(first_from_id, first_from_label, first_st, first_et)
+    stays.append(first_origin_stay)
+    
+    # Create stays at destinations of all trips
     for from_id, to_id, st, et in trips:
         activity_label = locations[to_id].get('activity_label', 'unknown')
         stays.append(Stay(to_id, activity_label, et, None))
+    
+    # Set end times for all stays
     for i in range(len(stays)):
         current_stay = stays[i]
         if i < len(stays) - 1:
-            next_trip_start = trips[i + 1][2]
-            current_stay.set_end_time(next_trip_start)
+            # End time is start of next stay
+            next_stay_start = stays[i + 1].start_time
+            if next_stay_start is not None:
+                current_stay.set_end_time(next_stay_start)
         else:
+            # Last stay: set end time to start + 1 hour (default)
             if current_stay.start_time is not None:
                 current_stay.set_end_time(current_stay.start_time + 3600)
+    
     return stays
 
 

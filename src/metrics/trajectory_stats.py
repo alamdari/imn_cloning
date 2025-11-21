@@ -4,8 +4,8 @@ Compute trajectory-level statistics: duration, length, temporal patterns.
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple
-from datetime import datetime
+from typing import Dict, List, Tuple, Optional
+from datetime import datetime, timezone
 
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -98,7 +98,32 @@ def compute_trip_path_length(df: pd.DataFrame) -> pd.Series:
     return path_lengths
 
 
-def extract_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
+# City to timezone mapping
+CITY_TIMEZONES = {
+    'milan': 'Europe/Rome',
+    'porto': 'Europe/Lisbon',
+    'rome': 'Europe/Rome',
+    'lisbon': 'Europe/Lisbon',
+}
+
+
+def get_city_timezone(city_name: Optional[str]) -> Optional[str]:
+    """
+    Get timezone for a city name.
+    
+    Args:
+        city_name: City name (e.g., 'milan', 'porto')
+        
+    Returns:
+        Timezone string (e.g., 'Europe/Rome') or None if not found
+    """
+    if city_name is None:
+        return None
+    city_lower = city_name.lower()
+    return CITY_TIMEZONES.get(city_lower)
+
+
+def extract_temporal_features(df: pd.DataFrame, city_name: Optional[str] = None) -> pd.DataFrame:
     """
     Extract temporal features: start time, hour of day, day of week.
     
@@ -108,6 +133,8 @@ def extract_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     Args:
         df: DataFrame with columns [trajectory_id, lat, lon, time]
                 Optional: day_date column for relative time conversion
+        city_name: City name for timezone conversion (e.g., 'milan', 'porto').
+                   If None, uses UTC. This ensures hour-of-day reflects local time.
         
     Returns:
         DataFrame with trajectory-level temporal features
@@ -122,23 +149,17 @@ def extract_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
     
     if is_relative_time and 'day_date' in df.columns:
         # Convert relative times to Unix timestamps using day_date
-        # Get first date from day_date column
-        first_date_str = df['day_date'].iloc[0]
+        # IMPORTANT: Use UTC explicitly to match original trajectory timestamps
         try:
-            # Parse the date (format: YYYY-MM-DD)
-            reference_date = pd.to_datetime(first_date_str).date()
-            # Get midnight timestamp for reference date
-            reference_midnight = datetime.combine(reference_date, datetime.min.time())
-            reference_ts = int(reference_midnight.timestamp())
-            
             # Convert each trajectory's relative time to Unix timestamp
             converted_times = []
             for traj_id in start_times.index:
                 traj_data = df[df['trajectory_id'] == traj_id]
                 day_str = traj_data['day_date'].iloc[0]
                 day_date = pd.to_datetime(day_str).date()
-                day_midnight = datetime.combine(day_date, datetime.min.time())
-                day_midnight_ts = int(day_midnight.timestamp())
+                # Create midnight datetime in UTC (not local timezone!)
+                day_midnight_utc = datetime.combine(day_date, datetime.min.time(), tzinfo=timezone.utc)
+                day_midnight_ts = int(day_midnight_utc.timestamp())
                 
                 relative_time = start_times[traj_id]
                 unix_time = day_midnight_ts + int(relative_time)
@@ -146,30 +167,48 @@ def extract_temporal_features(df: pd.DataFrame) -> pd.DataFrame:
             
             start_times = pd.Series(converted_times, index=start_times.index)
         except Exception as e:
-            # If conversion fails, use a fixed reference (April 3, 2007)
+            # If conversion fails, use a fixed reference (April 3, 2007) in UTC
             print(f"  ⚠ Warning: Could not parse day_date, using fixed reference date. Error: {e}")
-            reference_ts = 1175587260  # April 3, 2007
+            # April 3, 2007 00:00:00 UTC
+            reference_ts = 1175558400  # Fixed UTC timestamp for April 3, 2007 midnight UTC
             start_times = start_times + reference_ts
     
-    # Convert timestamps to datetime
-    dt_series = pd.to_datetime(start_times, unit='s')
+    # Convert timestamps to datetime (Unix timestamps are in UTC)
+    dt_series = pd.to_datetime(start_times, unit='s', utc=True)
+    
+    # Convert to local timezone for hour extraction
+    # This ensures "hour of day" reflects local time, not UTC
+    tz_name = get_city_timezone(city_name)
+    if tz_name:
+        try:
+            import pytz
+            local_tz = pytz.timezone(tz_name)
+            dt_series_local = dt_series.dt.tz_convert(local_tz)
+        except (ImportError, Exception):
+            # Fallback if pytz not available or timezone invalid - use UTC hours
+            dt_series_local = dt_series
+    else:
+        # No city specified - use UTC hours
+        dt_series_local = dt_series
     
     temporal_features = pd.DataFrame({
         'trajectory_id': start_times.index,
         'start_time': start_times.values,
-        'start_hour': dt_series.dt.hour.values,
-        'start_day_of_week': dt_series.dt.dayofweek.values,
+        'start_hour': dt_series_local.dt.hour.values,
+        'start_day_of_week': dt_series_local.dt.dayofweek.values,
     })
     
     return temporal_features
 
 
-def compute_trajectory_statistics(df: pd.DataFrame) -> pd.DataFrame:
+def compute_trajectory_statistics(df: pd.DataFrame, city_name: Optional[str] = None) -> pd.DataFrame:
     """
     Compute comprehensive trajectory statistics.
     
     Args:
         df: DataFrame with columns [trajectory_id, lat, lon, time]
+        city_name: City name for timezone conversion (e.g., 'milan', 'porto').
+                   If None, uses UTC. This ensures hour-of-day reflects local time.
         
     Returns:
         DataFrame with all trajectory-level statistics
@@ -177,7 +216,7 @@ def compute_trajectory_statistics(df: pd.DataFrame) -> pd.DataFrame:
     durations = compute_trip_duration(df)
     od_lengths = compute_trip_length(df)
     path_lengths = compute_trip_path_length(df)
-    temporal_features = extract_temporal_features(df)
+    temporal_features = extract_temporal_features(df, city_name=city_name)
     
     # Extract origin and destination coordinates
     grouped = df.groupby('trajectory_id')

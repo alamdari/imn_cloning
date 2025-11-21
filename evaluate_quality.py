@@ -88,6 +88,22 @@ def main():
         help='Optional: Directory with original trajectory files (JSON from imn_generation.py or CSV)'
     )
     
+    parser.add_argument(
+        '--source-city',
+        type=str,
+        default='milan',
+        choices=['milan', 'porto'],
+        help='Source city name for original trajectory timezone (default: milan)'
+    )
+    
+    parser.add_argument(
+        '--target-city',
+        type=str,
+        default='porto',
+        choices=['milan', 'porto'],
+        help='Target city name for synthetic trajectory timezone (default: porto)'
+    )
+    
     args = parser.parse_args()
     
     # Setup output logging
@@ -110,6 +126,8 @@ def main():
         print(f"Trajectories: {args.trajectories}")
         print(f"Output: {args.output}")
         print(f"Grid size: {args.grid_size}m")
+        print(f"Source city: {args.source_city} (for original trajectory timezone)")
+        print(f"Target city: {args.target_city} (for synthetic trajectory timezone)")
         if args.original:
             print(f"Original trajectories: {args.original}")
         print()
@@ -119,7 +137,9 @@ def main():
             trajectories_dir=args.trajectories,
             output_dir=args.output,
             grid_size_m=args.grid_size,
-            original_trajectories_dir=args.original
+            original_trajectories_dir=args.original,
+            source_city=args.source_city,
+            target_city=args.target_city
         )
         
         print()
