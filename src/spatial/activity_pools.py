@@ -102,10 +102,7 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
     amenities_cache = os.path.join(cache_dir, f"{city_name}_amenities.pkl")
     amenities_geojson = os.path.join(cache_dir, f"{city_name}_amenities.geojson")
     
-    # MINIMAL AMENITY QUERY: Only essential types for fast prototyping
-    print("    Will query minimal essential amenity types (fast mode)")
-    
-    # Query amenities from OSM (with caching)
+    # Query amenities from OSM using AMENITY_CLASSES (with caching)
     try:
         if os.path.exists(amenities_cache):
             print("    Loading cached amenities...")
@@ -113,34 +110,15 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
                 gdf_amenities = pickle.load(f)
             print(f"    Loaded {len(gdf_amenities)} amenity features from cache")
         else:
-            # MINIMAL QUERY: Only essential amenity types
-            print("    Querying OSM amenities (minimal set)...")
-            tags = {
-                'amenity': [
-                    'restaurant', 'cafe', 'bar',        # eat
-                    'school', 'university',             # school
-                    'hospital', 'clinic', 'doctors',    # health
-                    'supermarket',                      # shop
-                    'office', 'bank',                   # work/finance
-                ]
-            }
+            # Query all amenity types from AMENITY_CLASSES
+            needed_amenity_types = []
+            for amenity_class, amenity_list in AMENITY_CLASSES.items():
+                needed_amenity_types.extend(amenity_list)
+            needed_amenity_types = list(set(needed_amenity_types))
+            print(f"    Querying OSM amenities ({len(needed_amenity_types)} amenity types from AMENITY_CLASSES)...")
+            tags = {'amenity': needed_amenity_types}
             gdf_amenities = ox.features.features_from_bbox(bbox=bbox, tags=tags)
             print(f"    Retrieved {len(gdf_amenities)} amenity features")
-            
-            # OLD CODE: Queries from AMENITY_CLASSES (111 types - too slow)
-            # needed_amenity_types = []
-            # for amenity_class, amenity_list in AMENITY_CLASSES.items():
-            #     needed_amenity_types.extend(amenity_list)
-            # needed_amenity_types = list(set(needed_amenity_types))
-            # print(f"    Will query {len(needed_amenity_types)} specific amenity types")
-            # tags = {'amenity': needed_amenity_types}
-            # gdf_amenities = ox.features.features_from_bbox(bbox=bbox, tags=tags)
-            
-            # OLD CODE: Queries ALL amenities (27K+ features - very slow)
-            # print("    Querying OSM amenities...")
-            # tags = {'amenity': True}
-            # gdf_amenities = ox.features.features_from_bbox(bbox=bbox, tags=tags)
-            # print(f"    Retrieved {len(gdf_amenities)} amenity features")
             
             # Save to cache (pickle for speed)
             with open(amenities_cache, 'wb') as f:
