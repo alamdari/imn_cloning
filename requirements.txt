@@ -1,0 +1,76 @@
+# Core dependencies for IMN Cloning Project
+# Generated from virtual environment: /Users/omid/.virtualenvs/global
+# Last updated: 2025-01-XX
+#
+# To install: pip install -r requirements.txt
+
+# ============================================================================
+# Core Data Manipulation and Analysis
+# ============================================================================
+numpy==2.3.2
+pandas==2.3.1
+python-dateutil==2.9.0.post0
+
+# ============================================================================
+# Geographic and Spatial Analysis
+# ============================================================================
+osmnx==2.0.6
+geopandas==1.1.1
+networkx==3.5
+pyproj==3.7.2
+shapely==2.1.1
+rtree==1.4.1
+rasterio==1.4.3
+geopy==2.4.1
+geographiclib==2.1
+
+# ============================================================================
+# Visualization
+# ============================================================================
+folium==0.20.0
+matplotlib==3.10.5
+seaborn==0.13.2
+
+# ============================================================================
+# Timezone Handling
+# ============================================================================
+pytz==2025.2
+
+# ============================================================================
+# HTTP Requests (for downloading population data)
+# ============================================================================
+requests==2.32.4
+urllib3==2.5.0
+certifi==2025.8.3
+
+# ============================================================================
+# Required Dependencies (automatically installed by above packages)
+# ============================================================================
+# Rasterio dependencies
+affine==2.4.0
+
+# OSMnx/GeoPandas dependencies
+click==8.2.1
+click-plugins==1.1.1.2
+cligj==0.7.2
+fsspec==2025.7.0
+xyzservices==2025.4.0
+
+# Matplotlib dependencies
+packaging==25.0
+pyparsing==3.2.3
+
+# Folium dependencies
+branca==0.8.1
+
+# Note: Some packages may require system-level dependencies:
+# - GDAL (for geopandas/rasterio): Install via system package manager
+#   macOS: brew install gdal
+#   Ubuntu/Debian: sudo apt-get install gdal-bin libgdal-dev
+#   Or use conda: conda install -c conda-forge gdal
+#
+# - PROJ (for pyproj): Usually comes with GDAL
+#
+# - SpatialIndex (for rtree): 
+#   macOS: brew install spatialindex
+#   Ubuntu/Debian: sudo apt-get install libspatialindex-dev

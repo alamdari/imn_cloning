@@ -15,7 +15,7 @@ from src.visualization.timelines import save_user_timelines
 from src.visualization.maps import generate_interactive_porto_map_multi, generate_interactive_original_city_map, create_split_map_html
 
 
-def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_levels: List[float], paths: PathsConfig, tz, G, gdf_cumulative_p, activity_pools: Dict[str, List[int]]) -> None:
+def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_levels: List[float], paths: PathsConfig, tz, G, gdf_cumulative_p, activity_pools: Dict[str, List[int]], use_random_mapping: bool = False) -> None:
     print(f"Processing user {user_id}...")
     enriched = enrich_imn_with_poi(imn, poi_info)
     stays = read_stays_from_trips(enriched['trips'], enriched['locations'])
@@ -37,11 +37,15 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_leve
     # Use the configured spatial randomness level
     chosen_r = paths.spatial_randomness
     from src.spatial.mapping import map_imn_to_osm
+    # For random mapping ablation study: ignore activity_pools
+    mapping_activity_pools = None if use_random_mapping else activity_pools
+    if use_random_mapping:
+        print(f"  ↳ Using RANDOM spatial mapping (ablation study mode)")
     map_loc_imn_user, rmse_user = map_imn_to_osm(
         enriched, 
         G, 
         gdf_cumulative_p=gdf_cumulative_p,
-        activity_pools=activity_pools,
+        activity_pools=mapping_activity_pools,
         random_seed=user_id  # Use user_id as seed for deterministic but unique mapping
     )
     fixed_home = map_loc_imn_user.get(enriched['home'])
@@ -139,6 +143,10 @@ def run_pipeline(paths: PathsConfig, randomness_levels: List[float], tz) -> None
     print(f"  - Temporal: using all levels {randomness_levels}")
     print(f"  - Spatial: using randomness = {paths.spatial_randomness}")
     print(f"Target City: {paths.target_city.upper()}")
+    if paths.use_random_mapping:
+        print(f"⚠ ABLATION MODE: Using RANDOM spatial mapping (activity-aware mapping disabled)")
+    else:
+        print(f"  - Spatial mapping: Activity-aware (using activity pools)")
     print()
 
     try:
@@ -160,7 +168,7 @@ def run_pipeline(paths: PathsConfig, randomness_levels: List[float], tz) -> None
     for idx, uid in enumerate(imns.keys(), 1):
         print(f"[{idx}/{len(imns)}] ")
         try:
-            process_single_user(uid, imns[uid], poi_data[uid], randomness_levels, paths, tz, G, gdf_cumulative_p, activity_pools)
+            process_single_user(uid, imns[uid], poi_data[uid], randomness_levels, paths, tz, G, gdf_cumulative_p, activity_pools, paths.use_random_mapping)
         except Exception as e:
             print(f"!! Error processing user {uid}: {e}")
 
