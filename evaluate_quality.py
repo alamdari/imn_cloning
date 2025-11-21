@@ -104,6 +104,13 @@ def main():
         help='Target city name for synthetic trajectory timezone (default: porto)'
     )
     
+    parser.add_argument(
+        '--compute-path-metrics',
+        action='store_true',
+        default=False,
+        help='Compute path metrics (shortest path, detour ratio, etc.). This is computationally expensive. (default: False)'
+    )
+    
     args = parser.parse_args()
     
     # Setup output logging
@@ -128,6 +135,7 @@ def main():
         print(f"Grid size: {args.grid_size}m")
         print(f"Source city: {args.source_city} (for original trajectory timezone)")
         print(f"Target city: {args.target_city} (for synthetic trajectory timezone)")
+        print(f"Compute path metrics: {args.compute_path_metrics}")
         if args.original:
             print(f"Original trajectories: {args.original}")
         print()
@@ -139,7 +147,8 @@ def main():
             grid_size_m=args.grid_size,
             original_trajectories_dir=args.original,
             source_city=args.source_city,
-            target_city=args.target_city
+            target_city=args.target_city,
+            compute_path_metrics=args.compute_path_metrics
         )
         
         print()

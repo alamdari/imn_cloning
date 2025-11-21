@@ -427,6 +427,8 @@ def plot_distribution_comparison(synthetic_stats: pd.DataFrame,
                                  target_city: str = 'porto'):
     """
     Create side-by-side comparison plots of synthetic vs original distributions.
+    Also creates overlay versions with alpha transparency.
+    Uses shared bins and scales for easy comparison.
     
     Args:
         synthetic_stats: Statistics from synthetic trajectories
@@ -440,12 +442,18 @@ def plot_distribution_comparison(synthetic_stats: pd.DataFrame,
         return
     
     # 1. Trip Duration Comparison
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-    
     syn_dur_min = synthetic_stats['duration_seconds'] / 60.0
     orig_dur_min = original_stats['duration_seconds'] / 60.0
     
-    ax1.hist(orig_dur_min, bins=50, edgecolor='black', alpha=0.7, color='blue')
+    # Compute shared bins and range
+    all_dur = pd.concat([orig_dur_min, syn_dur_min])
+    dur_min, dur_max = all_dur.min(), all_dur.max()
+    dur_bins = 50
+    
+    # Side-by-side plot
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    
+    ax1.hist(orig_dur_min, bins=dur_bins, range=(dur_min, dur_max), edgecolor='black', alpha=0.7, color='blue')
     ax1.set_xlabel('Trip Duration (minutes)', fontsize=12)
     ax1.set_ylabel('Frequency', fontsize=12)
     ax1.set_title('Original City - Trip Duration', fontsize=14, fontweight='bold')
@@ -454,7 +462,7 @@ def plot_distribution_comparison(synthetic_stats: pd.DataFrame,
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
-    ax2.hist(syn_dur_min, bins=50, edgecolor='black', alpha=0.7, color='green')
+    ax2.hist(syn_dur_min, bins=dur_bins, range=(dur_min, dur_max), edgecolor='black', alpha=0.7, color='green')
     ax2.set_xlabel('Trip Duration (minutes)', fontsize=12)
     ax2.set_ylabel('Frequency', fontsize=12)
     ax2.set_title(f'Target City ({target_city.upper()}) - Trip Duration', fontsize=14, fontweight='bold')
@@ -468,13 +476,35 @@ def plot_distribution_comparison(synthetic_stats: pd.DataFrame,
     plt.close()
     print(f"  ✓ Saved: duration_comparison.png")
     
-    # 2. Trip Length Comparison
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    # Overlay version
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.hist(orig_dur_min, bins=dur_bins, range=(dur_min, dur_max), edgecolor='black', alpha=0.6, color='blue', label=f'Original ({source_city.upper()})')
+    ax.hist(syn_dur_min, bins=dur_bins, range=(dur_min, dur_max), edgecolor='black', alpha=0.6, color='green', label=f'Synthetic ({target_city.upper()})')
+    ax.set_xlabel('Trip Duration (minutes)', fontsize=12)
+    ax.set_ylabel('Frequency', fontsize=12)
+    ax.set_title('Trip Duration Comparison (Overlay)', fontsize=14, fontweight='bold')
+    ax.axvline(orig_dur_min.mean(), color='blue', linestyle='--', alpha=0.7, label=f'Original Mean: {orig_dur_min.mean():.1f} min')
+    ax.axvline(syn_dur_min.mean(), color='green', linestyle='--', alpha=0.7, label=f'Synthetic Mean: {syn_dur_min.mean():.1f} min')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'duration_comparison_overlay.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  ✓ Saved: duration_comparison_overlay.png")
     
+    # 2. Trip Length Comparison
     syn_len_km = synthetic_stats['od_distance_meters'] / 1000.0
     orig_len_km = original_stats['od_distance_meters'] / 1000.0
     
-    ax1.hist(orig_len_km, bins=50, edgecolor='black', alpha=0.7, color='blue')
+    # Compute shared bins and range
+    all_len = pd.concat([orig_len_km, syn_len_km])
+    len_min, len_max = all_len.min(), all_len.max()
+    len_bins = 50
+    
+    # Side-by-side plot
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    
+    ax1.hist(orig_len_km, bins=len_bins, range=(len_min, len_max), edgecolor='black', alpha=0.7, color='blue')
     ax1.set_xlabel('Trip Length (km)', fontsize=12)
     ax1.set_ylabel('Frequency', fontsize=12)
     ax1.set_title('Original City - Trip Length', fontsize=14, fontweight='bold')
@@ -483,7 +513,7 @@ def plot_distribution_comparison(synthetic_stats: pd.DataFrame,
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
-    ax2.hist(syn_len_km, bins=50, edgecolor='black', alpha=0.7, color='green')
+    ax2.hist(syn_len_km, bins=len_bins, range=(len_min, len_max), edgecolor='black', alpha=0.7, color='green')
     ax2.set_xlabel('Trip Length (km)', fontsize=12)
     ax2.set_ylabel('Frequency', fontsize=12)
     ax2.set_title(f'Target City ({target_city.upper()}) - Trip Length', fontsize=14, fontweight='bold')
@@ -497,11 +527,32 @@ def plot_distribution_comparison(synthetic_stats: pd.DataFrame,
     plt.close()
     print(f"  ✓ Saved: length_comparison.png")
     
+    # Overlay version
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.hist(orig_len_km, bins=len_bins, range=(len_min, len_max), edgecolor='black', alpha=0.6, color='blue', label=f'Original ({source_city.upper()})')
+    ax.hist(syn_len_km, bins=len_bins, range=(len_min, len_max), edgecolor='black', alpha=0.6, color='green', label=f'Synthetic ({target_city.upper()})')
+    ax.set_xlabel('Trip Length (km)', fontsize=12)
+    ax.set_ylabel('Frequency', fontsize=12)
+    ax.set_title('Trip Length Comparison (Overlay)', fontsize=14, fontweight='bold')
+    ax.axvline(orig_len_km.mean(), color='blue', linestyle='--', alpha=0.7, label=f'Original Mean: {orig_len_km.mean():.2f} km')
+    ax.axvline(syn_len_km.mean(), color='green', linestyle='--', alpha=0.7, label=f'Synthetic Mean: {syn_len_km.mean():.2f} km')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, 'length_comparison_overlay.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"  ✓ Saved: length_comparison_overlay.png")
+    
     # 3. Temporal Distribution Comparison
     if 'start_hour' in original_stats.columns and 'start_hour' in synthetic_stats.columns:
+        # Shared bins for temporal (always 0-24)
+        temp_bins = 24
+        temp_range = (0, 24)
+        
+        # Side-by-side plot
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
         
-        ax1.hist(original_stats['start_hour'], bins=24, range=(0, 24), 
+        ax1.hist(original_stats['start_hour'], bins=temp_bins, range=temp_range, 
                 edgecolor='black', alpha=0.7, color='blue')
         ax1.set_xlabel('Hour of Day', fontsize=12)
         ax1.set_ylabel('Number of Trips', fontsize=12)
@@ -509,7 +560,7 @@ def plot_distribution_comparison(synthetic_stats: pd.DataFrame,
         ax1.set_xticks(range(0, 24, 2))
         ax1.grid(True, alpha=0.3, axis='y')
         
-        ax2.hist(synthetic_stats['start_hour'], bins=24, range=(0, 24), 
+        ax2.hist(synthetic_stats['start_hour'], bins=temp_bins, range=temp_range, 
                 edgecolor='black', alpha=0.7, color='green')
         ax2.set_xlabel('Hour of Day', fontsize=12)
         ax2.set_ylabel('Number of Trips', fontsize=12)
@@ -521,12 +572,31 @@ def plot_distribution_comparison(synthetic_stats: pd.DataFrame,
         plt.savefig(os.path.join(output_dir, 'temporal_comparison.png'), dpi=300, bbox_inches='tight')
         plt.close()
         print(f"  ✓ Saved: temporal_comparison.png")
+        
+        # Overlay version
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.hist(original_stats['start_hour'], bins=temp_bins, range=temp_range, 
+                edgecolor='black', alpha=0.6, color='blue', label=f'Original ({source_city.upper()})')
+        ax.hist(synthetic_stats['start_hour'], bins=temp_bins, range=temp_range, 
+                edgecolor='black', alpha=0.6, color='green', label=f'Synthetic ({target_city.upper()})')
+        ax.set_xlabel('Hour of Day', fontsize=12)
+        ax.set_ylabel('Number of Trips', fontsize=12)
+        ax.set_title('Temporal Distribution Comparison (Overlay)', fontsize=14, fontweight='bold')
+        ax.set_xticks(range(0, 24, 2))
+        ax.legend()
+        ax.grid(True, alpha=0.3, axis='y')
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, 'temporal_comparison_overlay.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"  ✓ Saved: temporal_comparison_overlay.png")
 
 
 def plot_path_metrics_comparison(original_metrics: pd.DataFrame, synthetic_metrics: pd.DataFrame,
                                  output_dir: str):
     """
     Create side-by-side comparison plots for path metrics.
+    Also creates overlay versions with alpha transparency.
+    Uses shared bins and scales for easy comparison.
     
     Args:
         original_metrics: DataFrame with original trajectory path metrics
@@ -552,12 +622,27 @@ def plot_path_metrics_comparison(original_metrics: pd.DataFrame, synthetic_metri
         if original_metrics[metric_name].isna().all() and synthetic_metrics[metric_name].isna().all():
             continue
         
+        orig_data = original_metrics[metric_name].dropna()
+        syn_data = synthetic_metrics[metric_name].dropna()
+        
+        if len(orig_data) == 0 and len(syn_data) == 0:
+            continue
+        
+        # Compute shared bins and range
+        all_data = pd.concat([orig_data, syn_data])
+        data_min, data_max = all_data.min(), all_data.max()
+        # Use 50 bins, but ensure we have valid range
+        if data_max > data_min:
+            bins = 50
+        else:
+            bins = 10  # Fallback for edge case
+        
+        # Side-by-side plot
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
         
         # Original distribution
-        orig_data = original_metrics[metric_name].dropna()
         if len(orig_data) > 0:
-            ax1.hist(orig_data, bins=50, edgecolor='black', alpha=0.7, color='blue')
+            ax1.hist(orig_data, bins=bins, range=(data_min, data_max), edgecolor='black', alpha=0.7, color='blue')
             mean_val = orig_data.mean()
             ax1.axvline(mean_val, color='red', linestyle='--', 
                        label=f'Mean: {mean_val:.3f}')
@@ -569,9 +654,8 @@ def plot_path_metrics_comparison(original_metrics: pd.DataFrame, synthetic_metri
         ax1.grid(True, alpha=0.3)
         
         # Synthetic distribution
-        syn_data = synthetic_metrics[metric_name].dropna()
         if len(syn_data) > 0:
-            ax2.hist(syn_data, bins=50, edgecolor='black', alpha=0.7, color='green')
+            ax2.hist(syn_data, bins=bins, range=(data_min, data_max), edgecolor='black', alpha=0.7, color='green')
             mean_val = syn_data.mean()
             ax2.axvline(mean_val, color='red', linestyle='--', 
                        label=f'Mean: {mean_val:.3f}')
@@ -587,4 +671,33 @@ def plot_path_metrics_comparison(original_metrics: pd.DataFrame, synthetic_metri
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
         print(f"    ✓ Saved: path_metrics_{metric_name}_comparison.png")
+        
+        # Overlay version
+        if len(orig_data) > 0 or len(syn_data) > 0:
+            fig, ax = plt.subplots(figsize=(10, 6))
+            
+            if len(orig_data) > 0:
+                ax.hist(orig_data, bins=bins, range=(data_min, data_max), 
+                       edgecolor='black', alpha=0.6, color='blue', label='Original')
+                orig_mean = orig_data.mean()
+                ax.axvline(orig_mean, color='blue', linestyle='--', alpha=0.7, 
+                          label=f'Original Mean: {orig_mean:.3f}')
+            
+            if len(syn_data) > 0:
+                ax.hist(syn_data, bins=bins, range=(data_min, data_max), 
+                       edgecolor='black', alpha=0.6, color='green', label='Synthetic')
+                syn_mean = syn_data.mean()
+                ax.axvline(syn_mean, color='green', linestyle='--', alpha=0.7, 
+                          label=f'Synthetic Mean: {syn_mean:.3f}')
+            
+            ax.set_xlabel(f'{metric_label} ({unit})', fontsize=12)
+            ax.set_ylabel('Frequency', fontsize=12)
+            ax.set_title(f'{metric_label} Comparison (Overlay)', fontsize=14, fontweight='bold')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            plt.tight_layout()
+            overlay_path = os.path.join(output_dir, f'path_metrics_{metric_name}_comparison_overlay.png')
+            plt.savefig(overlay_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"    ✓ Saved: path_metrics_{metric_name}_comparison_overlay.png")
 

@@ -303,7 +303,8 @@ def compute_path_metrics(df: pd.DataFrame, G, trajectory_type: str = "unknown") 
 
 def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m: float = 500.0, 
                            original_trajectories_dir: str = None,
-                           source_city: str = 'milan', target_city: str = 'porto'):
+                           source_city: str = 'milan', target_city: str = 'porto',
+                           compute_path_metrics: bool = False):
     """
     Generate comprehensive quality evaluation report for synthetic trajectories.
     
@@ -314,6 +315,8 @@ def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m:
         original_trajectories_dir: Optional path to original trajectories for comparison
         source_city: Source city name (e.g., 'milan') for original trajectory timezone
         target_city: Target city name (e.g., 'porto') for synthetic trajectory timezone
+        compute_path_metrics: If True, compute path metrics (shortest path, detour ratio, etc.). 
+                              This is computationally expensive. Default: False.
     """
     print("\n" + "="*60)
     print("SYNTHETIC TRAJECTORY QUALITY EVALUATION")
@@ -541,7 +544,8 @@ def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m:
     )
     
     # Generate path metrics diagnosis if both original and synthetic trajectories are available
-    if original_trajectories_dir is not None and original_stats is not None and len(original_user_trajs_combined) > 0:
+    # AND compute_path_metrics is enabled
+    if compute_path_metrics and original_trajectories_dir is not None and original_stats is not None and len(original_user_trajs_combined) > 0:
         print("\nGenerating path metrics diagnosis...")
         try:
             # Load OSM graphs for shortest path computation
@@ -624,6 +628,14 @@ def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m:
             print(f"  ⚠ Path metrics diagnosis failed: {e}")
             import traceback
             traceback.print_exc()
+    elif compute_path_metrics and (original_trajectories_dir is None or original_stats is None or len(original_user_trajs_combined) == 0):
+        print("\n⚠ Skipping path metrics computation:")
+        if original_trajectories_dir is None:
+            print("  → Original trajectories directory not provided")
+        elif original_stats is None:
+            print("  → Could not load original trajectory statistics")
+        elif len(original_user_trajs_combined) == 0:
+            print("  → No matching original trajectories found")
     
     print("\n" + "="*60)
     print("QUALITY EVALUATION COMPLETE")
@@ -633,7 +645,7 @@ def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m:
     print(f"  - trajectory_statistics.csv (synthetic)")
     if original_stats is not None:
         print(f"  - original_trajectory_statistics.csv")
-    if len(original_user_trajs_combined) > 0:
+    if compute_path_metrics and len(original_user_trajs_combined) > 0:
         print(f"  - original_path_metrics.csv")
         print(f"  - synthetic_path_metrics.csv")
     print(f"  - od_matrix.csv")
@@ -645,9 +657,12 @@ def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m:
     print(f"\nVisualizations:")
     if original_stats is not None:
         print(f"  Comparison Plots (Original vs Synthetic):")
-        print(f"    - duration_comparison.png")
-        print(f"    - length_comparison.png")
-        print(f"    - temporal_comparison.png")
+        print(f"    - duration_comparison.png (side-by-side)")
+        print(f"    - duration_comparison_overlay.png (overlay with alpha)")
+        print(f"    - length_comparison.png (side-by-side)")
+        print(f"    - length_comparison_overlay.png (overlay with alpha)")
+        print(f"    - temporal_comparison.png (side-by-side)")
+        print(f"    - temporal_comparison_overlay.png (overlay with alpha)")
     else:
         print(f"  Synthetic-only distributions:")
         print(f"    - trip_duration_distribution.png")
@@ -658,13 +673,18 @@ def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m:
     print(f"    - trip_length_boxplot.png")
     print(f"    - day_of_week_distribution.png")
     print(f"    - path_vs_od_distance.png")
-    if len(original_user_trajs_combined) > 0:
+    if compute_path_metrics and len(original_user_trajs_combined) > 0:
         print(f"  Path Metrics Comparison Plots:")
-        print(f"    - path_metrics_straight_line_distance_comparison.png")
-        print(f"    - path_metrics_actual_path_length_comparison.png")
-        print(f"    - path_metrics_shortest_path_length_comparison.png")
-        print(f"    - path_metrics_detour_ratio_comparison.png")
-        print(f"    - path_metrics_efficiency_comparison.png")
+        print(f"    - path_metrics_straight_line_distance_comparison.png (side-by-side)")
+        print(f"    - path_metrics_straight_line_distance_comparison_overlay.png (overlay)")
+        print(f"    - path_metrics_actual_path_length_comparison.png (side-by-side)")
+        print(f"    - path_metrics_actual_path_length_comparison_overlay.png (overlay)")
+        print(f"    - path_metrics_shortest_path_length_comparison.png (side-by-side)")
+        print(f"    - path_metrics_shortest_path_length_comparison_overlay.png (overlay)")
+        print(f"    - path_metrics_detour_ratio_comparison.png (side-by-side)")
+        print(f"    - path_metrics_detour_ratio_comparison_overlay.png (overlay)")
+        print(f"    - path_metrics_efficiency_comparison.png (side-by-side)")
+        print(f"    - path_metrics_efficiency_comparison_overlay.png (overlay)")
     
     print(f"\nInteractive Maps:")
     print(f"  - origin_density_map.html (heatmap + toggleable markers)")
