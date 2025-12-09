@@ -149,22 +149,34 @@ def extract_temporal_features(df: pd.DataFrame, city_name: Optional[str] = None)
     
     if is_relative_time and 'day_date' in df.columns:
         # Convert relative times to Unix timestamps using day_date
-        # IMPORTANT: Use UTC explicitly to match original trajectory timestamps
+        # Use the city timezone when available to avoid shifting local midnight.
         try:
-            # Convert each trajectory's relative time to Unix timestamp
+            tz_name = get_city_timezone(city_name)
+            local_tz = None
+            if tz_name:
+                try:
+                    import pytz
+                    local_tz = pytz.timezone(tz_name)
+                except Exception:
+                    local_tz = None
+
             converted_times = []
             for traj_id in start_times.index:
                 traj_data = df[df['trajectory_id'] == traj_id]
                 day_str = traj_data['day_date'].iloc[0]
                 day_date = pd.to_datetime(day_str).date()
-                # Create midnight datetime in UTC (not local timezone!)
-                day_midnight_utc = datetime.combine(day_date, datetime.min.time(), tzinfo=timezone.utc)
-                day_midnight_ts = int(day_midnight_utc.timestamp())
-                
+
+                if local_tz is not None:
+                    day_midnight_local = local_tz.localize(datetime.combine(day_date, datetime.min.time()))
+                    day_midnight_ts = int(day_midnight_local.timestamp())
+                else:
+                    # Fallback to UTC if timezone unavailable
+                    day_midnight_ts = int(datetime.combine(day_date, datetime.min.time(), tzinfo=timezone.utc).timestamp())
+
                 relative_time = start_times[traj_id]
                 unix_time = day_midnight_ts + int(relative_time)
                 converted_times.append(unix_time)
-            
+
             start_times = pd.Series(converted_times, index=start_times.index)
         except Exception as e:
             # If conversion fails, use a fixed reference (April 3, 2007) in UTC
@@ -173,30 +185,61 @@ def extract_temporal_features(df: pd.DataFrame, city_name: Optional[str] = None)
             reference_ts = 1175558400  # Fixed UTC timestamp for April 3, 2007 midnight UTC
             start_times = start_times + reference_ts
     
-    # Convert timestamps to datetime (Unix timestamps are in UTC)
-    dt_series = pd.to_datetime(start_times, unit='s', utc=True)
-    
-    # Convert to local timezone for hour extraction
-    # This ensures "hour of day" reflects local time, not UTC
-    tz_name = get_city_timezone(city_name)
-    if tz_name:
-        try:
-            import pytz
-            local_tz = pytz.timezone(tz_name)
-            dt_series_local = dt_series.dt.tz_convert(local_tz)
-        except (ImportError, Exception):
-            # Fallback if pytz not available or timezone invalid - use UTC hours
-            dt_series_local = dt_series
+    # If times are relative (<100000), compute start_hour directly from relative seconds.
+    # Relative times are already in seconds since day start, so just convert to hours modulo 24.
+    if is_relative_time:
+        # Simple and correct: relative seconds / 3600, wrapped to 0-23
+        start_hours = (start_times.values / 3600.0) % 24
+        start_hours = start_hours.astype(int)
+        
+        # For day of week, use day_date if available
+        if 'day_date' in df.columns:
+            start_dows = []
+            for traj_id in start_times.index:
+                traj_data = df[df['trajectory_id'] == traj_id]
+                day_str = traj_data['day_date'].iloc[0]
+                try:
+                    day_date = pd.to_datetime(day_str)
+                    start_dows.append(day_date.weekday())
+                except:
+                    start_dows.append(np.nan)
+        else:
+            start_dows = [np.nan] * len(start_hours)
+
+        temporal_features = pd.DataFrame({
+            'trajectory_id': start_times.index,
+            'start_time': start_times.values,  # keep as relative seconds
+            'start_hour': start_hours,
+            'start_day_of_week': start_dows,
+        })
+    elif is_relative_time:
+        start_hour = (start_times.values / 3600.0) % 24
+        start_dow = np.full_like(start_hour, np.nan, dtype=float)
+        temporal_features = pd.DataFrame({
+            'trajectory_id': start_times.index,
+            'start_time': start_times.values,
+            'start_hour': start_hour,
+            'start_day_of_week': start_dow,
+        })
     else:
-        # No city specified - use UTC hours
-        dt_series_local = dt_series
-    
-    temporal_features = pd.DataFrame({
-        'trajectory_id': start_times.index,
-        'start_time': start_times.values,
-        'start_hour': dt_series_local.dt.hour.values,
-        'start_day_of_week': dt_series_local.dt.dayofweek.values,
-    })
+        # Absolute timestamps: use timezone-aware conversion
+        dt_series = pd.to_datetime(start_times, unit='s', utc=True)
+        tz_name = get_city_timezone(city_name)
+        if tz_name:
+            try:
+                import pytz
+                local_tz = pytz.timezone(tz_name)
+                dt_series_local = dt_series.dt.tz_convert(local_tz)
+            except (ImportError, Exception):
+                dt_series_local = dt_series
+        else:
+            dt_series_local = dt_series
+        temporal_features = pd.DataFrame({
+            'trajectory_id': start_times.index,
+            'start_time': start_times.values,
+            'start_hour': dt_series_local.dt.hour.values,
+            'start_day_of_week': dt_series_local.dt.dayofweek.values,
+        })
     
     return temporal_features
 
@@ -216,6 +259,37 @@ def compute_trajectory_statistics(df: pd.DataFrame, city_name: Optional[str] = N
     durations = compute_trip_duration(df)
     od_lengths = compute_trip_length(df)
     path_lengths = compute_trip_path_length(df)
+
+    # Defensive casting: ensure all core metrics are 1D numeric Series.
+    # On large experiments, upstream data may accidentally contain non‑scalar
+    # objects (e.g. small arrays) which would otherwise cause pandas to treat
+    # them as 2D and raise errors when building the DataFrame.
+    cleaned_metrics = {}
+    for name, series in [
+        ("duration_seconds", durations),
+        ("od_distance_meters", od_lengths),
+        ("path_length_meters", path_lengths),
+    ]:
+        if isinstance(series, pd.Series):
+            # Happy path: already a Series indexed by trajectory_id
+            cleaned = pd.to_numeric(series, errors="coerce")
+        else:
+            # Fall back: try to treat input as a 1D array; if it's not 1D,
+            # drop it and log a warning.
+            arr = np.asarray(series)
+            if arr.ndim != 1:
+                print(
+                    f"  ⚠ Metric '{name}' had unexpected shape {arr.shape}; "
+                    f"replacing with empty Series."
+                )
+                cleaned = pd.Series(dtype=float)
+            else:
+                cleaned = pd.Series(pd.to_numeric(arr, errors="coerce"))
+        cleaned_metrics[name] = cleaned
+
+    durations = cleaned_metrics["duration_seconds"]
+    od_lengths = cleaned_metrics["od_distance_meters"]
+    path_lengths = cleaned_metrics["path_length_meters"]
     temporal_features = extract_temporal_features(df, city_name=city_name)
     
     # Extract origin and destination coordinates
@@ -223,15 +297,27 @@ def compute_trajectory_statistics(df: pd.DataFrame, city_name: Optional[str] = N
     origins = grouped[['lat', 'lon']].first().rename(columns={'lat': 'origin_lat', 'lon': 'origin_lon'})
     destinations = grouped[['lat', 'lon']].last().rename(columns={'lat': 'dest_lat', 'lon': 'dest_lon'})
     
-    # Combine all statistics
-    stats = pd.DataFrame({
-        'duration_seconds': durations,
-        'od_distance_meters': od_lengths,
-        'path_length_meters': path_lengths,
-    })
+    # Build a canonical trajectory_id index to avoid relying on implicit index
+    # names, which can be lost when Series are empty or coerced.
+    traj_ids = (
+        df['trajectory_id']
+        .drop_duplicates()
+        .sort_values()
+        .values
+    )
+    stats = pd.DataFrame({'trajectory_id': traj_ids}).set_index('trajectory_id')
     
-    stats = stats.join(origins).join(destinations).reset_index()
-    stats = stats.merge(temporal_features, on='trajectory_id')
+    # Align metrics on this index
+    stats['duration_seconds'] = durations.reindex(stats.index)
+    stats['od_distance_meters'] = od_lengths.reindex(stats.index)
+    stats['path_length_meters'] = path_lengths.reindex(stats.index)
+    
+    # Join spatial info
+    stats = stats.join(origins, how='left').join(destinations, how='left')
+    
+    # Bring trajectory_id back as a column and merge temporal features
+    stats = stats.reset_index()
+    stats = stats.merge(temporal_features, on='trajectory_id', how='left')
     
     return stats
 

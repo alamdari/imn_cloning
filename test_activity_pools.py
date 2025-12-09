@@ -186,60 +186,53 @@ def plot_home_work_comparison(home_stats: pd.DataFrame, work_stats: pd.DataFrame
     print(f"  ✓ Saved: {os.path.basename(output_path)}")
 
 
-def create_interactive_map(activity_pools: Dict[str, List[int]], G, 
+def create_interactive_map(activity_pools: Dict[str, List[int]], G,
                           city_name: str, output_path: str):
-    """Create interactive Folium map showing home and work node distributions."""
+    """Create interactive Folium map showing all activity pools."""
     city_config = CITY_CONFIGS[city_name]
     center_lat, center_lon = city_config['center']
-    
+
+    # Simple color palette per activity
+    color_map = {
+        'home': 'darkblue', 'work': 'orange', 'eat': 'green', 'utility': 'purple',
+        'transit': 'red', 'unknown': 'gray', 'school': 'yellow', 'shop': 'pink',
+        'leisure': 'lightgreen', 'health': 'lightcoral', 'admin': 'lightblue',
+        'finance': 'gold'
+    }
+
     # Create base map
     m = folium.Map(
         location=[center_lat, center_lon],
         zoom_start=12,
         tiles='OpenStreetMap'
     )
-    
-    # Add home nodes
-    if 'home' in activity_pools:
-        home_nodes = list(set(activity_pools['home']))
-        home_group = folium.FeatureGroup(name='Home Nodes', show=True)
-        for node_id in home_nodes[:5000]:  # Limit to 5000 for performance
+
+    # Add each activity as its own layer
+    for activity, nodes in activity_pools.items():
+        if not nodes:
+            continue
+        layer = folium.FeatureGroup(name=f"{activity} ({len(set(nodes))})", show=False)
+        node_ids = list(set(nodes))
+        added = 0
+        for node_id in node_ids[:5000]:  # Limit per layer for performance
             node_data = G.nodes[node_id]
             folium.CircleMarker(
                 location=[node_data['y'], node_data['x']],
-                radius=2,
-                popup=f"Home Node: {node_id}",
-                color='blue',
+                radius=4,  # larger marker for visibility
+                popup=f"{activity} node: {node_id}",
+                color='black',  # stroke color for contrast
                 fill=True,
-                fill_color='blue',
-                fill_opacity=0.6,
+                fill_color=color_map.get(activity, 'black'),
+                fill_opacity=0.8,
                 weight=1
-            ).add_to(home_group)
-        home_group.add_to(m)
-        print(f"    Added {min(len(home_nodes), 5000)} home nodes to map")
-    
-    # Add work nodes
-    if 'work' in activity_pools:
-        work_nodes = list(set(activity_pools['work']))
-        work_group = folium.FeatureGroup(name='Work Nodes', show=True)
-        for node_id in work_nodes[:5000]:  # Limit to 5000 for performance
-            node_data = G.nodes[node_id]
-            folium.CircleMarker(
-                location=[node_data['y'], node_data['x']],
-                radius=2,
-                popup=f"Work Node: {node_id}",
-                color='red',
-                fill=True,
-                fill_color='red',
-                fill_opacity=0.6,
-                weight=1
-            ).add_to(work_group)
-        work_group.add_to(m)
-        print(f"    Added {min(len(work_nodes), 5000)} work nodes to map")
-    
+            ).add_to(layer)
+            added += 1
+        layer.add_to(m)
+        print(f"    Added {added} {activity} nodes to map (capped at 5000)")
+
     # Add layer control
     folium.LayerControl(collapsed=False).add_to(m)
-    
+
     # Save map
     m.save(output_path)
     print(f"  ✓ Saved: {os.path.basename(output_path)}")
@@ -315,8 +308,8 @@ def main():
         '--city',
         type=str,
         default='porto',
-        choices=['porto', 'milan'],
-        help='Target city to analyze (default: porto)'
+        choices=list(CITY_CONFIGS.keys()),
+        help=f"Target city to analyze (default: porto). Available: {list(CITY_CONFIGS.keys())}"
     )
     
     parser.add_argument(

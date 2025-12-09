@@ -68,6 +68,7 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_leve
             fixed_work_node=fixed_work,
             precomputed_map_loc_rmse=(map_loc_imn_user, rmse_user),
             activity_pools=activity_pools,
+            user_id=user_id,  # Pass user_id to ensure unique sampling per user
         )
         if traj is None:
             print(f"  ⚠ Spatial simulation failed for user {user_id} on day {some_day}")
@@ -157,7 +158,7 @@ def run_pipeline(paths: PathsConfig, randomness_levels: List[float], tz) -> None
 
     try:
         print(f"Preparing spatial resources for {paths.target_city.upper()} (OSM graph + population + activity pools)...")
-        G, gdf_cumulative_p, activity_pools = ensure_spatial_resources("data", generate_cumulative_map, target_city=paths.target_city)
+        G, gdf_cumulative_p, activity_pools = ensure_spatial_resources(paths.data_dir, generate_cumulative_map, target_city=paths.target_city)
         print("✓ Spatial resources ready")
     except Exception as e:
         print(f"⚠ Spatial resources setup failed: {e}")

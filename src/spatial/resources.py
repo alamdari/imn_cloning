@@ -19,6 +19,11 @@ CITY_CONFIGS = {
         'center': (45.4642, 9.1900),  # Milan city center
         'radius_m': 15000,  # Larger radius for Milan
         'display_name': 'Milan, Italy'
+    },
+    'waterdown': {
+        'center': (43.331075, -79.895593),  
+        'radius_m': 2400,
+        'display_name': 'Waterdown, Canada'
     }
 }
 

@@ -14,6 +14,7 @@ def simulate_synthetic_trips(
     fixed_work_node: Optional[int] = None,
     precomputed_map_loc_rmse: Optional[Tuple[Dict[int, int], float]] = None,
     activity_pools: Optional[Dict[str, List[int]]] = None,
+    user_id: Optional[int] = None,
 ) -> Tuple[List[Tuple[float, float, int]], Dict[Any, int], Dict[str, int], float, List[List[Tuple[float, float, int]]]]:
     """
     Simulate spatial trips for synthetic stays using precomputed IMN→OSM mapping.
@@ -44,9 +45,23 @@ def simulate_synthetic_trips(
     
     map_loc_imn, rmse = precomputed_map_loc_rmse
     
-    # Set random seed for reproducibility
+    # Set random seed for reproducibility - use user_id to ensure uniqueness
+    # This ensures each user gets different node selections even with same randomness level
     if randomness is not None:
-        np.random.seed(int(randomness * 10000))
+        # Combine randomness level with user_id for unique seed per user
+        # If user_id not provided, try to get from IMN, otherwise use hash of home/work coords
+        if user_id is None:
+            user_id = imn.get('uid', imn.get('user_id', 0))
+            if user_id == 0:
+                # Fallback: use hash of home/work coordinates for uniqueness
+                try:
+                    home_coords = tuple(imn['locations'][imn['home']]['coordinates'])
+                    work_coords = tuple(imn['locations'][imn['work']]['coordinates'])
+                    user_id = hash((home_coords, work_coords)) % 1000000
+                except:
+                    user_id = 0
+        unique_seed = int(randomness * 10000) + user_id
+        np.random.seed(unique_seed)
     
     # Get fixed home and work nodes
     home_node = fixed_home_node if fixed_home_node is not None else map_loc_imn.get(imn['home'])

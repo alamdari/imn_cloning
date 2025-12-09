@@ -85,13 +85,23 @@ def generate_synthetic_day(original_stays, duration_probs: Dict, transition_prob
         pert_end = day_length
         pert_dur = max(1, pert_end - pert_start)
     synthetic_stays = []
-    current_time = 0
+    # Start at the first original stay's start time; if it's after midnight, add a home stay from 0 to that time.
+    first_rel_start = rel_stays[0][1] if rel_stays else 0
+    current_time = first_rel_start
     prev_activity = "home"
+    if first_rel_start > 0:
+        synthetic_stays.append(("home", 0, first_rel_start))
     for (s, rel_start, rel_end) in rel_stays:
         if s is anchor_stay:
             break
         if current_time == 0:
-            act = "home"
+            # Check if this is a split activity continuation (starts at midnight)
+            if rel_start == 0:
+                # Split activity continuation - preserve the activity label
+                act = s.activity_label
+            else:
+                # No split activity - enforce "home" at time 0
+                act = "home"
         elif np.random.random() < (1 - randomness):
             act = s.activity_label
         else:

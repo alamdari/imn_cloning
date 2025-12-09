@@ -6,65 +6,80 @@ from typing import Dict, List, Optional
 import numpy as np
 import osmnx as ox
 from collections import defaultdict
+import time
+import math
 
 
-# Amenity classes from add_poi_to_imns.py for consistency
-AMENITY_CLASSES = {
-    'transportation': [
-        'parking', 'taxi', 'fuel', 'parking_entrance', 'parking_exit', 'parking_access', 'car_rental',
-        'bicycle_rental', 'bus_station', 'bicycle_parking', 'motorcycle_parking', 'ferry_terminal',
-        'kick-scooter_parking', 'motorcycle_rental', 'taxi_rank'
+# Activity tag definitions: broader than amenity=* to avoid empty pools.
+# Keys are activity labels; values are lists of (osm_key, [values]) tuples.
+ACTIVITY_TAGS = {
+    'transit': [
+        ('amenity', [
+            'parking', 'taxi', 'fuel', 'parking_entrance', 'parking_exit', 'parking_access',
+            'car_rental', 'bicycle_rental', 'bus_station', 'bicycle_parking', 'motorcycle_parking',
+            'ferry_terminal', 'kick-scooter_parking', 'motorcycle_rental', 'taxi_rank'
+        ]),
+        ('public_transport', ['station', 'stop_position', 'platform']),
+        ('railway', ['station', 'halt', 'stop', 'tram_stop']),
+        ('highway', ['bus_stop', 'bus_station']),
+        ('aeroway', ['aerodrome', 'terminal']),
     ],
-    'healthcare': [
-        'pharmacy', 'clinic', 'hospital', 'dentist', 'doctors', 'veterinary', 'nursing_home',
-        'health_post'
+    'health': [
+        ('amenity', [
+            'pharmacy', 'clinic', 'hospital', 'dentist', 'doctors', 'veterinary', 'nursing_home',
+            'health_post'
+        ]),
     ],
-    'public_services': [
-        'post_office', 'police', 'fire_station', 'townhall', 'courthouse', 'waste_disposal',
-        'waste_basket', 'social_facility', 'shelter', 'community_centre', 'public_bookcase',
-        'animal_shelter', 'events_venue', 'prison', 'archive', 'post_depot', 'mortuary',
-        'public_building', 'crematorium', 'payment_centre', 'meeting_room', 'reception_desk',
-        'reception_desk;lost_property_office', 'lost_property_office', 'group_home', 'dormitory'
+    'admin': [
+        ('amenity', [
+            'post_office', 'police', 'fire_station', 'townhall', 'courthouse', 'waste_disposal',
+            'social_facility', 'shelter', 'community_centre', 'public_bookcase', 'events_venue',
+            'prison', 'archive', 'mortuary', 'public_building', 'crematorium', 'payment_centre',
+            'meeting_room', 'reception_desk', 'group_home', 'dormitory'
+        ]),
+        ('office', ['government', 'administrative']),
     ],
     'finance': [
-        'bank', 'atm', 'bureau_de_change', 'money_transfer'
+        ('amenity', ['bank', 'atm', 'bureau_de_change', 'money_transfer']),
     ],
-    'food_and_drink': [
-        'restaurant', 'cafe', 'fast_food', 'pub', 'bar', 'ice_cream', 'biergarten', 'food_court',
-        'canteen', 'restaurant;cafe'
+    'eat': [
+        ('amenity', [
+            'restaurant', 'cafe', 'fast_food', 'pub', 'bar', 'ice_cream', 'biergarten', 'food_court',
+            'canteen'
+        ]),
     ],
-    'utilities': [
-        'telephone', 'recycling', 'drinking_water', 'toilets', 'vending_machine', 'charging_station',
-        'compressed_air', 'sanitary_dump_station', 'water_point', 'bicycle_repair_station',
-        'foot_shower', 'vacuum_cleaner', 'parcel_locker', 'fixme'
+    'utility': [
+        ('amenity', [
+            'telephone', 'recycling', 'drinking_water', 'toilets', 'vending_machine',
+            'charging_station', 'compressed_air', 'sanitary_dump_station', 'water_point',
+            'bicycle_repair_station', 'vacuum_cleaner', 'parcel_locker'
+        ]),
+        ('man_made', ['water_tower', 'wastewater_plant', 'works']),
+        ('power', ['substation', 'plant']),
     ],
-    'education': [
-        'library', 'school', 'kindergarten', 'college', 'university', 'music_school', 'driving_school',
-        'childcare', 'research_institute', 'prep_school', 'language_school', 'training',
-        'dancing_school'
+    'school': [
+        ('amenity', [
+            'library', 'school', 'kindergarten', 'college', 'university', 'music_school',
+            'driving_school', 'childcare', 'research_institute', 'language_school'
+        ]),
     ],
-    'entertainment_and_recreation': [
-        'cinema', 'theatre', 'nightclub', 'club', 'studio', 'events_venue', 'gambling', 'dojo',
-        'hookah_lounge', 'stripclub', 'concert_hall', 'planetarium', 'exhibition_centre',
-        'love_hotel', 'public_bath', 'watering_place', 'stage', 'auditorium'
+    'leisure': [
+        ('amenity', [
+            'cinema', 'theatre', 'nightclub', 'studio', 'events_venue', 'gambling',
+            'public_bath', 'watering_place', 'auditorium'
+        ]),
+        ('leisure', ['park', 'playground', 'pitch', 'sports_centre', 'stadium', 'swimming_pool']),
     ],
-    'shopping': [
-        'marketplace', 'shop', 'mall', 'supermarket'
-    ]
-}
-
-
-# Map amenity classes to activity labels used in our system
-AMENITY_TO_ACTIVITY = {
-    'transportation': 'transit',
-    'healthcare': 'health',
-    'public_services': 'admin',
-    'finance': 'finance',
-    'food_and_drink': 'eat',
-    'utilities': 'utility',
-    'education': 'school',
-    'entertainment_and_recreation': 'leisure',
-    'shopping': 'shop'
+    'shop': [
+        ('amenity', ['marketplace', 'mall']),
+        ('shop', [
+            'supermarket', 'convenience', 'mall', 'department_store', 'bakery', 'beverages',
+            'alcohol', 'butcher', 'greengrocer', 'kiosk', 'clothes', 'shoes', 'electronics',
+            'hardware', 'doityourself', 'furniture', 'books', 'sports', 'outdoor', 'variety_store',
+            'stationery', 'beauty', 'chemist', 'jewelry', 'gift'
+        ]),
+    ],
+    # Note: 'work' and 'home' are handled separately via landuse queries + 50% augmentation
 }
 
 
@@ -97,28 +112,56 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
     all_nodes = list(G.nodes())
     activity_pools: Dict[str, set] = defaultdict(set)
     
+    # Build a BallTree (haversine) for fast radius queries on nodes
+    node_ids = np.array(all_nodes)
+    node_lats = np.array([G.nodes[n]['y'] for n in node_ids])
+    node_lons = np.array([G.nodes[n]['x'] for n in node_ids])
+    node_coords_rad = np.vstack([np.radians(node_lats), np.radians(node_lons)]).T
+    tree = None
+    earth_radius_m = 6371000.0
+    radius_rad = proximity_m / earth_radius_m
+    try:
+        from sklearn.neighbors import BallTree
+        tree = BallTree(node_coords_rad, metric='haversine')
+    except Exception:
+        tree = None
+        print("    ⚠ BallTree not available; falling back to slower per-feature nearest_nodes")
+    
     # Cache paths for amenity GeoDataFrames
     os.makedirs(cache_dir, exist_ok=True)
     amenities_cache = os.path.join(cache_dir, f"{city_name}_amenities.pkl")
     amenities_geojson = os.path.join(cache_dir, f"{city_name}_amenities.geojson")
+    tag_keys = set()
+    tag_value_to_activity: Dict[str, Dict[str, str]] = defaultdict(dict)
+    for activity, kv_list in ACTIVITY_TAGS.items():
+        for key, values in kv_list:
+            tag_keys.add(key)
+            for v in values:
+                tag_value_to_activity[key][v] = activity
+    tags_combined: Dict[str, List[str]] = {}
+    for key in tag_keys:
+        values = set()
+        for activity, kv_list in ACTIVITY_TAGS.items():
+            for k, vals in kv_list:
+                if k == key:
+                    values.update(vals)
+        tags_combined[key] = list(values)
     
+    t_start_total = time.time()
+
     # Query amenities from OSM using AMENITY_CLASSES (with caching)
     try:
+        t_amenities_query = time.time()
         if os.path.exists(amenities_cache):
             print("    Loading cached amenities...")
             with open(amenities_cache, 'rb') as f:
                 gdf_amenities = pickle.load(f)
             print(f"    Loaded {len(gdf_amenities)} amenity features from cache")
         else:
-            # Query all amenity types from AMENITY_CLASSES
-            needed_amenity_types = []
-            for amenity_class, amenity_list in AMENITY_CLASSES.items():
-                needed_amenity_types.extend(amenity_list)
-            needed_amenity_types = list(set(needed_amenity_types))
-            print(f"    Querying OSM amenities ({len(needed_amenity_types)} amenity types from AMENITY_CLASSES)...")
-            tags = {'amenity': needed_amenity_types}
-            gdf_amenities = ox.features.features_from_bbox(bbox=bbox, tags=tags)
-            print(f"    Retrieved {len(gdf_amenities)} amenity features")
+            # Query with broader tag sets (amenity, shop, leisure, transport, etc.)
+            print(f"    Querying OSM features for activity pools (keys: {sorted(tags_combined.keys())})...")
+            gdf_amenities = ox.features.features_from_bbox(bbox=bbox, tags=tags_combined)
+            print(f"    Retrieved {len(gdf_amenities)} features")
             
             # Save to cache (pickle for speed)
             with open(amenities_cache, 'wb') as f:
@@ -132,15 +175,11 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
             except Exception as e:
                 print(f"    ⚠ Could not save GeoJSON: {e}")
         
-        # Build reverse mapping: amenity type -> activity label
-        amenity_type_to_activity = {}
-        for amenity_class, amenity_list in AMENITY_CLASSES.items():
-            activity_label = AMENITY_TO_ACTIVITY.get(amenity_class, 'unknown')
-            for amenity_type in amenity_list:
-                amenity_type_to_activity[amenity_type] = activity_label
-        
+        print(f"    Amenities query time: {time.time() - t_amenities_query:0.1f}s")
+
         # For each amenity, find nearby nodes (PARALLELIZED)
         print(f"    Processing {len(gdf_amenities)} amenities to find nearby nodes (parallelized)...")
+        t_amenities_process = time.time()
         
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import multiprocessing as mp
@@ -151,41 +190,62 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
         # Use ThreadPoolExecutor (G is not pickleable for ProcessPoolExecutor)
         max_workers = min(mp.cpu_count(), 8)  # Limit to 8 threads to avoid overhead
         
-        def process_amenity_thread(amenity_row):
-            """Process amenity in thread (can access G directly)."""
-            idx, amenity = amenity_row
-            amenity_type = amenity.get('amenity')
-            if not amenity_type:
+        def process_feature_thread(feature_row):
+            """Process feature in thread (can access G directly)."""
+            idx, feature = feature_row
+            activity_label = None
+            for key in tag_value_to_activity.keys():
+                if key in feature and feature.get(key):
+                    val = feature.get(key)
+                    # Handle lists / multiple values
+                    if isinstance(val, (list, tuple, set)):
+                        for v in val:
+                            lbl = tag_value_to_activity[key].get(v)
+                            if lbl:
+                                activity_label = lbl
+                                break
+                    else:
+                        activity_label = tag_value_to_activity[key].get(val)
+                    if activity_label:
+                        break
+            if not activity_label:
                 return None
             
-            activity_label = amenity_type_to_activity.get(amenity_type, 'unknown')
-            if activity_label == 'unknown':
-                return None
-            
-            # Get amenity centroid
+            # Get feature centroid
             try:
-                geom = amenity['geometry']
+                geom = feature['geometry']
                 centroid = geom.centroid
-                amenity_lat, amenity_lon = centroid.y, centroid.x
+                feat_lat, feat_lon = centroid.y, centroid.x
             except Exception:
                 return None
             
             # Find nodes within proximity
             nearby_nodes_found = set()
             try:
-                nearby_nodes = ox.nearest_nodes(G, amenity_lon, amenity_lat, return_dist=False)
-                if isinstance(nearby_nodes, (list, tuple)):
-                    for node in nearby_nodes:
-                        node_data = G.nodes[node]
-                        dist = ox.distance.great_circle(amenity_lat, amenity_lon, node_data['y'], node_data['x'])
-                        if dist <= proximity_m:
-                            nearby_nodes_found.add(node)
+                if tree is not None:
+                    # Use BallTree for nearest neighbor; verify with great_circle to mirror fallback behavior.
+                    q = np.array([[math.radians(feat_lat), math.radians(feat_lon)]])
+                    dist_rad, idxs = tree.query(q, k=1)
+                    if dist_rad.size and dist_rad[0, 0] <= radius_rad:
+                        candidate = node_ids[idxs[0, 0]]
+                        node_data = G.nodes[candidate]
+                        dist_m = ox.distance.great_circle(feat_lat, feat_lon, node_data['y'], node_data['x'])
+                        if dist_m <= proximity_m:
+                            nearby_nodes_found.add(candidate)
                 else:
-                    # Single node
-                    node_data = G.nodes[nearby_nodes]
-                    dist = ox.distance.great_circle(amenity_lat, amenity_lon, node_data['y'], node_data['x'])
-                    if dist <= proximity_m:
-                        nearby_nodes_found.add(nearby_nodes)
+                    # Fallback to nearest_nodes + distance check
+                    nearby_nodes = ox.nearest_nodes(G, feat_lon, feat_lat, return_dist=False)
+                    if isinstance(nearby_nodes, (list, tuple)):
+                        for node in nearby_nodes:
+                            node_data = G.nodes[node]
+                            dist = ox.distance.great_circle(feat_lat, feat_lon, node_data['y'], node_data['x'])
+                            if dist <= proximity_m:
+                                nearby_nodes_found.add(node)
+                    else:
+                        node_data = G.nodes[nearby_nodes]
+                        dist = ox.distance.great_circle(feat_lat, feat_lon, node_data['y'], node_data['x'])
+                        if dist <= proximity_m:
+                            nearby_nodes_found.add(nearby_nodes)
             except Exception:
                 pass
             
@@ -195,7 +255,7 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
         processed = 0
         last_progress = 0
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(process_amenity_thread, row): row for row in amenity_rows}
+            futures = {executor.submit(process_feature_thread, row): row for row in amenity_rows}
             
             for future in as_completed(futures):
                 result = future.result()
@@ -212,6 +272,7 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
                     last_progress = progress
         
         print(f"    ✓ Processed all {len(gdf_amenities)} amenities (parallelized with {max_workers} threads)")
+        print(f"    Amenities processing time: {time.time() - t_amenities_process:0.1f}s")
                 
     except Exception as e:
         print(f"    ⚠ Failed to query amenities: {e}")
@@ -224,6 +285,7 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
     
     try:
         # Home: residential areas
+        t_res_query = time.time()
         if os.path.exists(residential_cache):
             print("    Loading cached residential areas...")
             with open(residential_cache, 'rb') as f:
@@ -245,25 +307,38 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
             except Exception as e:
                 print(f"    ⚠ Could not save GeoJSON: {e}")
         
+        print(f"    Residential query time: {time.time() - t_res_query:0.1f}s")
+
         print(f"    Processing {len(gdf_residential)} residential areas...")
+        t_res_process = time.time()
         total_residential = len(gdf_residential)
         for i, (idx, area) in enumerate(gdf_residential.iterrows(), 1):
             try:
                 geom = area['geometry']
                 centroid = geom.centroid
                 lat, lon = centroid.y, centroid.x
-                nearby_nodes = ox.nearest_nodes(G, lon, lat, return_dist=False)
-                if isinstance(nearby_nodes, (list, tuple)):
-                    for node in nearby_nodes:
-                        node_data = G.nodes[node]
-                        dist = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
-                        if dist <= proximity_m * 2:  # Larger radius for residential
-                            activity_pools['home'].add(node)
+                if tree is not None:
+                    q = np.array([[math.radians(lat), math.radians(lon)]])
+                    dist_rad, idxs = tree.query(q, k=1)
+                    if dist_rad.size and dist_rad[0, 0] <= (proximity_m * 2) / earth_radius_m:
+                        candidate = node_ids[idxs[0, 0]]
+                        node_data = G.nodes[candidate]
+                        dist_m = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
+                        if dist_m <= proximity_m * 2:
+                            activity_pools['home'].add(candidate)
                 else:
-                    node_data = G.nodes[nearby_nodes]
-                    dist = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
-                    if dist <= proximity_m * 2:
-                        activity_pools['home'].add(nearby_nodes)
+                    nearby_nodes = ox.nearest_nodes(G, lon, lat, return_dist=False)
+                    if isinstance(nearby_nodes, (list, tuple)):
+                        for node in nearby_nodes:
+                            node_data = G.nodes[node]
+                            dist = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
+                            if dist <= proximity_m * 2:  # Larger radius for residential
+                                activity_pools['home'].add(node)
+                    else:
+                        node_data = G.nodes[nearby_nodes]
+                        dist = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
+                        if dist <= proximity_m * 2:
+                            activity_pools['home'].add(nearby_nodes)
             except Exception:
                 continue
             
@@ -271,12 +346,14 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
             if i % max(1, total_residential // 10) == 0 or i == total_residential:
                 print(f"      {int(100 * i / total_residential)}% complete ({i}/{total_residential} residential areas)")
         print(f"    ✓ Processed residential areas")
+        print(f"    Residential processing time: {time.time() - t_res_process:0.1f}s")
                 
     except Exception as e:
         print(f"    ⚠ Failed to query residential landuse: {e}")
     
     # Work: commercial, industrial, office areas
     try:
+        t_work_query = time.time()
         if os.path.exists(work_cache):
             print("    Loading cached work areas...")
             with open(work_cache, 'rb') as f:
@@ -298,25 +375,38 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
             except Exception as e:
                 print(f"    ⚠ Could not save GeoJSON: {e}")
         
+        print(f"    Work query time: {time.time() - t_work_query:0.1f}s")
+
         print(f"    Processing {len(gdf_work)} work areas...")
+        t_work_process = time.time()
         total_work = len(gdf_work)
         for i, (idx, area) in enumerate(gdf_work.iterrows(), 1):
             try:
                 geom = area['geometry']
                 centroid = geom.centroid
                 lat, lon = centroid.y, centroid.x
-                nearby_nodes = ox.nearest_nodes(G, lon, lat, return_dist=False)
-                if isinstance(nearby_nodes, (list, tuple)):
-                    for node in nearby_nodes:
-                        node_data = G.nodes[node]
+                if tree is not None:
+                    q = np.array([[math.radians(lat), math.radians(lon)]])
+                    dist_rad, idxs = tree.query(q, k=1)
+                    if dist_rad.size and dist_rad[0, 0] <= (proximity_m * 2) / earth_radius_m:
+                        candidate = node_ids[idxs[0, 0]]
+                        node_data = G.nodes[candidate]
+                        dist_m = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
+                        if dist_m <= proximity_m * 2:
+                            activity_pools['work'].add(candidate)
+                else:
+                    nearby_nodes = ox.nearest_nodes(G, lon, lat, return_dist=False)
+                    if isinstance(nearby_nodes, (list, tuple)):
+                        for node in nearby_nodes:
+                            node_data = G.nodes[node]
+                            dist = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
+                            if dist <= proximity_m * 2:
+                                activity_pools['work'].add(node)
+                    else:
+                        node_data = G.nodes[nearby_nodes]
                         dist = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
                         if dist <= proximity_m * 2:
-                            activity_pools['work'].add(node)
-                else:
-                    node_data = G.nodes[nearby_nodes]
-                    dist = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
-                    if dist <= proximity_m * 2:
-                        activity_pools['work'].add(nearby_nodes)
+                            activity_pools['work'].add(nearby_nodes)
             except Exception:
                 continue
             
@@ -324,6 +414,7 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
             if i % max(1, total_work // 10) == 0 or i == total_work:
                 print(f"      {int(100 * i / total_work)}% complete ({i}/{total_work} work areas)")
         print(f"    ✓ Processed work areas")
+        print(f"    Work processing time: {time.time() - t_work_process:0.1f}s")
                 
     except Exception as e:
         print(f"    ⚠ Failed to query work landuse: {e}")
@@ -333,6 +424,16 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
     activity_labels = ['home', 'work', 'eat', 'school', 'health', 'shop', 'leisure', 
                       'transit', 'utility', 'admin', 'finance', 'unknown']
     
+    # Optional: augment home/work with random 50% of all nodes to mitigate sparse/missing tags.
+    # Set rng_seed to None for nondeterministic sampling; keep as-is for deterministic runs.
+    rng_seed = None
+    rng = np.random.default_rng(rng_seed)
+    half = len(all_nodes) // 2
+    extra_home = rng.choice(all_nodes, size=half, replace=False)
+    extra_work = rng.choice(all_nodes, size=half, replace=False)
+    activity_pools['home'].update(extra_home)
+    activity_pools['work'].update(extra_work)
+
     for activity in activity_labels:
         if activity in activity_pools and len(activity_pools[activity]) > 0:
             result[activity] = list(activity_pools[activity])
@@ -341,6 +442,7 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
             result[activity] = all_nodes.copy()
         print(f"    {activity}: {len(result[activity])} candidate nodes")
     
+    print(f"  Total pool build time: {time.time() - t_start_total:0.1f}s")
     return result
 
 

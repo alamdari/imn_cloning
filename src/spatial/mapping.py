@@ -74,8 +74,15 @@ def map_imn_to_osm(imn, target_osm, n_trials=10, gdf_cumulative_p=None, activity
     from pandas import DataFrame
     
     # Set random seed for deterministic results
+    # Use a combination of random_seed and a hash of IMN coordinates to ensure uniqueness
     if random_seed is not None:
-        np.random.seed(random_seed)
+        # Create a unique seed per user by combining random_seed with IMN home/work coordinates
+        # This ensures different users get different mappings even with similar IMN structures
+        home_coords = imn['locations'][imn['home']]['coordinates']
+        work_coords = imn['locations'][imn['work']]['coordinates']
+        coord_hash = hash((tuple(home_coords), tuple(work_coords))) % 1000000
+        unique_seed = (random_seed * 1000000 + coord_hash) % (2**31)
+        np.random.seed(unique_seed)
     
     nodes = list(target_osm.nodes())
     if gdf_cumulative_p is None:
@@ -123,17 +130,22 @@ def map_imn_to_osm(imn, target_osm, n_trials=10, gdf_cumulative_p=None, activity
         imn['locations'][work_id]['coordinates'][1],
     )
     
-    # Sample home candidates
-    home_candidates = get_activity_candidates('home', n_trials * 2)
-    work_candidates = get_activity_candidates('work', n_trials * 2)
+    # Sample home candidates - use more candidates and shuffle to ensure diversity
+    # Sample more candidates than needed to increase diversity across users
+    n_candidates = max(n_trials * 3, 30)  # Sample at least 30 candidates
+    home_candidates = get_activity_candidates('home', n_candidates)
+    work_candidates = get_activity_candidates('work', n_candidates)
     
-    # Find best home-work pair that preserves their distance
-    best_hw_error = float('inf')
-    best_home = home_candidates[0] if home_candidates else nodes[0]
-    best_work = work_candidates[0] if work_candidates else nodes[1]
+    # Shuffle candidates to avoid always using the same subset
+    np.random.shuffle(home_candidates)
+    np.random.shuffle(work_candidates)
     
-    for home_node in home_candidates[:n_trials]:
-        for work_node in work_candidates[:n_trials]:
+    # Find best home-work pair that preserves their distance.
+    # To avoid many users converging on the same pair, pick randomly among the top few pairs.
+    pair_errors = []
+    # Use all candidates for pairing, not just first n_trials
+    for home_node in home_candidates[:n_trials * 2]:
+        for work_node in work_candidates[:n_trials * 2]:
             if home_node == work_node:
                 continue
             osm_hw_dist = haversine_distance(
@@ -143,10 +155,26 @@ def map_imn_to_osm(imn, target_osm, n_trials=10, gdf_cumulative_p=None, activity
                 target_osm.nodes[work_node]['y'],
             )
             error = abs(osm_hw_dist - imn_hw_dist)
-            if error < best_hw_error:
-                best_hw_error = error
-                best_home = home_node
-                best_work = work_node
+            pair_errors.append((error, home_node, work_node))
+    if not pair_errors:
+        best_home = home_candidates[0] if home_candidates else nodes[0]
+        best_work = work_candidates[0] if work_candidates else nodes[1]
+        best_hw_error = 0.0  # No error if no pairs found
+    else:
+        pair_errors.sort(key=lambda x: x[0])
+        # Use a larger top_k (top 20% or at least 20 pairs) to ensure diversity across users
+        # This prevents many users from converging to the same optimal pair
+        # Add small random noise to error to break ties for identical distances
+        if random_seed is not None:
+            # Add tiny random perturbation to break ties (0-1% of error)
+            pair_errors = [(err * (1.0 + np.random.random() * 0.01), h, w) 
+                          for err, h, w in pair_errors]
+            pair_errors.sort(key=lambda x: x[0])
+        
+        top_k = max(20, min(len(pair_errors) // 5, 100))  # Top 20% or at least 20, max 100
+        top_k = min(top_k, len(pair_errors))
+        choice_idx = np.random.randint(top_k)
+        best_hw_error, best_home, best_work = pair_errors[choice_idx]
     
     # Initialize mapping with home and work
     map_loc = {home_id: best_home, work_id: best_work}
