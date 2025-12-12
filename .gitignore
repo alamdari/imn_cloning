@@ -8,6 +8,9 @@ cache/*
 !results/.gitkeep
 !cache/.gitkeep
 
+# diagnose_scripts folder
+diagnose_scripts/*
+
 # Python
 __pycache__/
 *.py[cod]

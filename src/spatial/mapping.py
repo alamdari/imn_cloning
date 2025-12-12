@@ -142,6 +142,11 @@ def map_imn_to_osm(imn, target_osm, n_trials=10, gdf_cumulative_p=None, activity
     
     # Find best home-work pair that preserves their distance.
     # To avoid many users converging on the same pair, pick randomly among the top few pairs.
+    # Apply spatial constraint: only consider pairs within 0.5x to 1.5x of original distance
+    # This prevents selection of unrealistically distant pairs and stabilizes spatial scale
+    min_allowed_dist = 0.5 * imn_hw_dist
+    max_allowed_dist = 1.5 * imn_hw_dist
+    
     pair_errors = []
     # Use all candidates for pairing, not just first n_trials
     for home_node in home_candidates[:n_trials * 2]:
@@ -154,7 +159,21 @@ def map_imn_to_osm(imn, target_osm, n_trials=10, gdf_cumulative_p=None, activity
                 target_osm.nodes[work_node]['x'],
                 target_osm.nodes[work_node]['y'],
             )
-            error = abs(osm_hw_dist - imn_hw_dist)
+            
+            # Spatial constraint: skip pairs outside the allowed range
+            if osm_hw_dist < min_allowed_dist or osm_hw_dist > max_allowed_dist:
+                continue
+            
+            # Directional penalty: apply stronger penalty when overshooting (d_osm > d_imn)
+            # This counteracts geometric bias where more ways exist to overshoot than undershoot
+            base_error = abs(osm_hw_dist - imn_hw_dist)
+            if osm_hw_dist > imn_hw_dist:
+                # Overshooting: apply 2x penalty to discourage selecting longer distances
+                error = base_error * 2.0
+            else:
+                # Undershooting: use base error (no extra penalty)
+                error = base_error
+            
             pair_errors.append((error, home_node, work_node))
     if not pair_errors:
         best_home = home_candidates[0] if home_candidates else nodes[0]
