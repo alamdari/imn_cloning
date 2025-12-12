@@ -28,7 +28,7 @@ IMN Extraction
             └── Activity-aware location mapping with distance constraints
                     │
                     ↓
-            IMN Reconstruction (convergence)
+            IMN Reconstruction at Target
                     │
                     ↓
             Trip Routing (network shortest paths)
