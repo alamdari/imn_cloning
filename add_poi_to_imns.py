@@ -91,7 +91,7 @@ def main():
     }
     gdf_other = ox.features.features_from_bbox(bbox=loc_bbox, tags=tags_other)
     print(f"  ✓ Retrieved {len(gdf_other)} other POI features")
-    
+
     # Combine all features
     import geopandas as gpd
     if len(gdf_all_amenities) > 0 and len(gdf_other) > 0:
@@ -126,13 +126,13 @@ def main():
         ],
         'health': [
             ('amenity', [
-                'pharmacy', 'clinic', 'hospital', 'dentist', 'doctors', 'veterinary', 'nursing_home',
-                'health_post'
+            'pharmacy', 'clinic', 'hospital', 'dentist', 'doctors', 'veterinary', 'nursing_home', 
+            'health_post'
             ]),
         ],
         'admin': [
             ('amenity', [
-                'post_office', 'police', 'fire_station', 'townhall', 'courthouse', 'waste_disposal',
+            'post_office', 'police', 'fire_station', 'townhall', 'courthouse', 'waste_disposal', 
                 'social_facility', 'shelter', 'community_centre', 'public_bookcase', 'events_venue',
                 'prison', 'archive', 'mortuary', 'public_building', 'crematorium', 'payment_centre',
                 'meeting_room', 'reception_desk', 'group_home', 'dormitory'
@@ -144,7 +144,7 @@ def main():
         ],
         'eat': [
             ('amenity', [
-                'restaurant', 'cafe', 'fast_food', 'pub', 'bar', 'ice_cream', 'biergarten', 'food_court',
+            'restaurant', 'cafe', 'fast_food', 'pub', 'bar', 'ice_cream', 'biergarten', 'food_court', 
                 'canteen'
             ]),
         ],

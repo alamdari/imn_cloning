@@ -172,11 +172,11 @@ def extract_temporal_features(df: pd.DataFrame, city_name: Optional[str] = None)
                 else:
                     # Fallback to UTC if timezone unavailable
                     day_midnight_ts = int(datetime.combine(day_date, datetime.min.time(), tzinfo=timezone.utc).timestamp())
-
+                
                 relative_time = start_times[traj_id]
                 unix_time = day_midnight_ts + int(relative_time)
                 converted_times.append(unix_time)
-
+            
             start_times = pd.Series(converted_times, index=start_times.index)
         except Exception as e:
             # If conversion fails, use a fixed reference (April 3, 2007) in UTC
@@ -223,23 +223,23 @@ def extract_temporal_features(df: pd.DataFrame, city_name: Optional[str] = None)
         })
     else:
         # Absolute timestamps: use timezone-aware conversion
-        dt_series = pd.to_datetime(start_times, unit='s', utc=True)
-        tz_name = get_city_timezone(city_name)
-        if tz_name:
-            try:
-                import pytz
-                local_tz = pytz.timezone(tz_name)
-                dt_series_local = dt_series.dt.tz_convert(local_tz)
-            except (ImportError, Exception):
+    dt_series = pd.to_datetime(start_times, unit='s', utc=True)
+    tz_name = get_city_timezone(city_name)
+    if tz_name:
+        try:
+            import pytz
+            local_tz = pytz.timezone(tz_name)
+            dt_series_local = dt_series.dt.tz_convert(local_tz)
+        except (ImportError, Exception):
                 dt_series_local = dt_series
         else:
             dt_series_local = dt_series
-        temporal_features = pd.DataFrame({
-            'trajectory_id': start_times.index,
-            'start_time': start_times.values,
-            'start_hour': dt_series_local.dt.hour.values,
-            'start_day_of_week': dt_series_local.dt.dayofweek.values,
-        })
+    temporal_features = pd.DataFrame({
+        'trajectory_id': start_times.index,
+        'start_time': start_times.values,
+        'start_hour': dt_series_local.dt.hour.values,
+        'start_day_of_week': dt_series_local.dt.dayofweek.values,
+    })
     
     return temporal_features
 

@@ -101,7 +101,7 @@ def generate_synthetic_day(original_stays, duration_probs: Dict, transition_prob
                 act = s.activity_label
             else:
                 # No split activity - enforce "home" at time 0
-                act = "home"
+            act = "home"
         elif np.random.random() < (1 - randomness):
             act = s.activity_label
         else:

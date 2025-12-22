@@ -26,13 +26,13 @@ ACTIVITY_TAGS = {
     ],
     'health': [
         ('amenity', [
-            'pharmacy', 'clinic', 'hospital', 'dentist', 'doctors', 'veterinary', 'nursing_home',
-            'health_post'
+        'pharmacy', 'clinic', 'hospital', 'dentist', 'doctors', 'veterinary', 'nursing_home',
+        'health_post'
         ]),
     ],
     'admin': [
         ('amenity', [
-            'post_office', 'police', 'fire_station', 'townhall', 'courthouse', 'waste_disposal',
+        'post_office', 'police', 'fire_station', 'townhall', 'courthouse', 'waste_disposal',
             'social_facility', 'shelter', 'community_centre', 'public_bookcase', 'events_venue',
             'prison', 'archive', 'mortuary', 'public_building', 'crematorium', 'payment_centre',
             'meeting_room', 'reception_desk', 'group_home', 'dormitory'
@@ -44,7 +44,7 @@ ACTIVITY_TAGS = {
     ],
     'eat': [
         ('amenity', [
-            'restaurant', 'cafe', 'fast_food', 'pub', 'bar', 'ice_cream', 'biergarten', 'food_court',
+        'restaurant', 'cafe', 'fast_food', 'pub', 'bar', 'ice_cream', 'biergarten', 'food_court',
             'canteen'
         ]),
     ],
@@ -148,7 +148,7 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
         tags_combined[key] = list(values)
     
     t_start_total = time.time()
-
+    
     # Query amenities from OSM using AMENITY_CLASSES (with caching)
     try:
         t_amenities_query = time.time()
@@ -176,7 +176,7 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
                 print(f"    ⚠ Could not save GeoJSON: {e}")
         
         print(f"    Amenities query time: {time.time() - t_amenities_query:0.1f}s")
-
+        
         # For each amenity, find nearby nodes (PARALLELIZED)
         print(f"    Processing {len(gdf_amenities)} amenities to find nearby nodes (parallelized)...")
         t_amenities_process = time.time()
@@ -235,17 +235,17 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
                 else:
                     # Fallback to nearest_nodes + distance check
                     nearby_nodes = ox.nearest_nodes(G, feat_lon, feat_lat, return_dist=False)
-                    if isinstance(nearby_nodes, (list, tuple)):
-                        for node in nearby_nodes:
-                            node_data = G.nodes[node]
+                if isinstance(nearby_nodes, (list, tuple)):
+                    for node in nearby_nodes:
+                        node_data = G.nodes[node]
                             dist = ox.distance.great_circle(feat_lat, feat_lon, node_data['y'], node_data['x'])
-                            if dist <= proximity_m:
-                                nearby_nodes_found.add(node)
-                    else:
-                        node_data = G.nodes[nearby_nodes]
-                        dist = ox.distance.great_circle(feat_lat, feat_lon, node_data['y'], node_data['x'])
                         if dist <= proximity_m:
-                            nearby_nodes_found.add(nearby_nodes)
+                            nearby_nodes_found.add(node)
+                else:
+                    node_data = G.nodes[nearby_nodes]
+                        dist = ox.distance.great_circle(feat_lat, feat_lon, node_data['y'], node_data['x'])
+                    if dist <= proximity_m:
+                        nearby_nodes_found.add(nearby_nodes)
             except Exception:
                 pass
             
@@ -308,7 +308,7 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
                 print(f"    ⚠ Could not save GeoJSON: {e}")
         
         print(f"    Residential query time: {time.time() - t_res_query:0.1f}s")
-
+        
         print(f"    Processing {len(gdf_residential)} residential areas...")
         t_res_process = time.time()
         total_residential = len(gdf_residential)
@@ -327,18 +327,18 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
                         if dist_m <= proximity_m * 2:
                             activity_pools['home'].add(candidate)
                 else:
-                    nearby_nodes = ox.nearest_nodes(G, lon, lat, return_dist=False)
-                    if isinstance(nearby_nodes, (list, tuple)):
-                        for node in nearby_nodes:
-                            node_data = G.nodes[node]
-                            dist = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
-                            if dist <= proximity_m * 2:  # Larger radius for residential
-                                activity_pools['home'].add(node)
-                    else:
-                        node_data = G.nodes[nearby_nodes]
+                nearby_nodes = ox.nearest_nodes(G, lon, lat, return_dist=False)
+                if isinstance(nearby_nodes, (list, tuple)):
+                    for node in nearby_nodes:
+                        node_data = G.nodes[node]
                         dist = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
-                        if dist <= proximity_m * 2:
-                            activity_pools['home'].add(nearby_nodes)
+                        if dist <= proximity_m * 2:  # Larger radius for residential
+                            activity_pools['home'].add(node)
+                else:
+                    node_data = G.nodes[nearby_nodes]
+                    dist = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
+                    if dist <= proximity_m * 2:
+                        activity_pools['home'].add(nearby_nodes)
             except Exception:
                 continue
             
@@ -376,7 +376,7 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
                 print(f"    ⚠ Could not save GeoJSON: {e}")
         
         print(f"    Work query time: {time.time() - t_work_query:0.1f}s")
-
+        
         print(f"    Processing {len(gdf_work)} work areas...")
         t_work_process = time.time()
         total_work = len(gdf_work)
@@ -395,18 +395,18 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
                         if dist_m <= proximity_m * 2:
                             activity_pools['work'].add(candidate)
                 else:
-                    nearby_nodes = ox.nearest_nodes(G, lon, lat, return_dist=False)
-                    if isinstance(nearby_nodes, (list, tuple)):
-                        for node in nearby_nodes:
-                            node_data = G.nodes[node]
-                            dist = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
-                            if dist <= proximity_m * 2:
-                                activity_pools['work'].add(node)
-                    else:
-                        node_data = G.nodes[nearby_nodes]
+                nearby_nodes = ox.nearest_nodes(G, lon, lat, return_dist=False)
+                if isinstance(nearby_nodes, (list, tuple)):
+                    for node in nearby_nodes:
+                        node_data = G.nodes[node]
                         dist = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
                         if dist <= proximity_m * 2:
-                            activity_pools['work'].add(nearby_nodes)
+                            activity_pools['work'].add(node)
+                else:
+                    node_data = G.nodes[nearby_nodes]
+                    dist = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
+                    if dist <= proximity_m * 2:
+                        activity_pools['work'].add(nearby_nodes)
             except Exception:
                 continue
             
@@ -433,7 +433,7 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
     extra_work = rng.choice(all_nodes, size=half, replace=False)
     activity_pools['home'].update(extra_home)
     activity_pools['work'].update(extra_work)
-
+    
     for activity in activity_labels:
         if activity in activity_pools and len(activity_pools[activity]) > 0:
             result[activity] = list(activity_pools[activity])
