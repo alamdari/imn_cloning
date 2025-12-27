@@ -212,34 +212,26 @@ def extract_temporal_features(df: pd.DataFrame, city_name: Optional[str] = None)
             'start_hour': start_hours,
             'start_day_of_week': start_dows,
         })
-    elif is_relative_time:
-        start_hour = (start_times.values / 3600.0) % 24
-        start_dow = np.full_like(start_hour, np.nan, dtype=float)
-        temporal_features = pd.DataFrame({
-            'trajectory_id': start_times.index,
-            'start_time': start_times.values,
-            'start_hour': start_hour,
-            'start_day_of_week': start_dow,
-        })
     else:
         # Absolute timestamps: use timezone-aware conversion
-    dt_series = pd.to_datetime(start_times, unit='s', utc=True)
-    tz_name = get_city_timezone(city_name)
-    if tz_name:
-        try:
-            import pytz
-            local_tz = pytz.timezone(tz_name)
-            dt_series_local = dt_series.dt.tz_convert(local_tz)
-        except (ImportError, Exception):
+        dt_series = pd.to_datetime(start_times, unit='s', utc=True)
+        tz_name = get_city_timezone(city_name)
+        if tz_name:
+            try:
+                import pytz
+                local_tz = pytz.timezone(tz_name)
+                dt_series_local = dt_series.dt.tz_convert(local_tz)
+            except (ImportError, Exception):
                 dt_series_local = dt_series
         else:
             dt_series_local = dt_series
-    temporal_features = pd.DataFrame({
-        'trajectory_id': start_times.index,
-        'start_time': start_times.values,
-        'start_hour': dt_series_local.dt.hour.values,
-        'start_day_of_week': dt_series_local.dt.dayofweek.values,
-    })
+
+        temporal_features = pd.DataFrame({
+            'trajectory_id': start_times.index,
+            'start_time': start_times.values,
+            'start_hour': dt_series_local.dt.hour.values,
+            'start_day_of_week': dt_series_local.dt.dayofweek.values,
+        })
     
     return temporal_features
 

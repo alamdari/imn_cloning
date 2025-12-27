@@ -235,17 +235,17 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
                 else:
                     # Fallback to nearest_nodes + distance check
                     nearby_nodes = ox.nearest_nodes(G, feat_lon, feat_lat, return_dist=False)
-                if isinstance(nearby_nodes, (list, tuple)):
-                    for node in nearby_nodes:
-                        node_data = G.nodes[node]
+                    if isinstance(nearby_nodes, (list, tuple)):
+                        for node in nearby_nodes:
+                            node_data = G.nodes[node]
                             dist = ox.distance.great_circle(feat_lat, feat_lon, node_data['y'], node_data['x'])
-                        if dist <= proximity_m:
-                            nearby_nodes_found.add(node)
-                else:
-                    node_data = G.nodes[nearby_nodes]
+                            if dist <= proximity_m:
+                                nearby_nodes_found.add(node)
+                    else:
+                        node_data = G.nodes[nearby_nodes]
                         dist = ox.distance.great_circle(feat_lat, feat_lon, node_data['y'], node_data['x'])
-                    if dist <= proximity_m:
-                        nearby_nodes_found.add(nearby_nodes)
+                        if dist <= proximity_m:
+                            nearby_nodes_found.add(nearby_nodes)
             except Exception:
                 pass
             
@@ -327,18 +327,18 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
                         if dist_m <= proximity_m * 2:
                             activity_pools['home'].add(candidate)
                 else:
-                nearby_nodes = ox.nearest_nodes(G, lon, lat, return_dist=False)
-                if isinstance(nearby_nodes, (list, tuple)):
-                    for node in nearby_nodes:
-                        node_data = G.nodes[node]
+                    nearby_nodes = ox.nearest_nodes(G, lon, lat, return_dist=False)
+                    if isinstance(nearby_nodes, (list, tuple)):
+                        for node in nearby_nodes:
+                            node_data = G.nodes[node]
+                            dist = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
+                            if dist <= proximity_m * 2:  # Larger radius for residential
+                                activity_pools['home'].add(node)
+                    else:
+                        node_data = G.nodes[nearby_nodes]
                         dist = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
-                        if dist <= proximity_m * 2:  # Larger radius for residential
-                            activity_pools['home'].add(node)
-                else:
-                    node_data = G.nodes[nearby_nodes]
-                    dist = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
-                    if dist <= proximity_m * 2:
-                        activity_pools['home'].add(nearby_nodes)
+                        if dist <= proximity_m * 2:
+                            activity_pools['home'].add(nearby_nodes)
             except Exception:
                 continue
             
@@ -395,18 +395,18 @@ def build_activity_node_pools(G, proximity_m: float = 200, cache_dir: str = "dat
                         if dist_m <= proximity_m * 2:
                             activity_pools['work'].add(candidate)
                 else:
-                nearby_nodes = ox.nearest_nodes(G, lon, lat, return_dist=False)
-                if isinstance(nearby_nodes, (list, tuple)):
-                    for node in nearby_nodes:
-                        node_data = G.nodes[node]
+                    nearby_nodes = ox.nearest_nodes(G, lon, lat, return_dist=False)
+                    if isinstance(nearby_nodes, (list, tuple)):
+                        for node in nearby_nodes:
+                            node_data = G.nodes[node]
+                            dist = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
+                            if dist <= proximity_m * 2:
+                                activity_pools['work'].add(node)
+                    else:
+                        node_data = G.nodes[nearby_nodes]
                         dist = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
                         if dist <= proximity_m * 2:
-                            activity_pools['work'].add(node)
-                else:
-                    node_data = G.nodes[nearby_nodes]
-                    dist = ox.distance.great_circle(lat, lon, node_data['y'], node_data['x'])
-                    if dist <= proximity_m * 2:
-                        activity_pools['work'].add(nearby_nodes)
+                            activity_pools['work'].add(nearby_nodes)
             except Exception:
                 continue
             

@@ -5,6 +5,13 @@ import osmnx as ox
 
 osm_paths_cache: Dict[Tuple[int, int], Optional[List[int]]] = {}
 
+# Optional spatial index support
+try:
+    from sklearn.neighbors import BallTree
+    HAS_SKLEARN = True
+except Exception:
+    HAS_SKLEARN = False
+
 
 def haversine_distance(x1, y1, x2, y2):
     R = 6371000
@@ -129,68 +136,144 @@ def map_imn_to_osm(imn, target_osm, n_trials=10, gdf_cumulative_p=None, activity
         imn['locations'][work_id]['coordinates'][0],
         imn['locations'][work_id]['coordinates'][1],
     )
-    
+
     # Sample home candidates - use more candidates and shuffle to ensure diversity
-    # Sample more candidates than needed to increase diversity across users
     n_candidates = max(n_trials * 3, 30)  # Sample at least 30 candidates
     home_candidates = get_activity_candidates('home', n_candidates)
-    work_candidates = get_activity_candidates('work', n_candidates)
-    
-    # Shuffle candidates to avoid always using the same subset
     np.random.shuffle(home_candidates)
+
+    # Hybrid sampling for work candidates:
+    # - Normal users: small work sample (fast)
+    # - Risky users (very small IMN HW distance): larger work sample (better coverage)
+    imn_hw_km = imn_hw_dist / 1000.0
+    RISKY_DIST_KM = 1.0
+    if imn_hw_km < RISKY_DIST_KM:
+        n_work_candidates = 2000
+    else:
+        n_work_candidates = max(n_trials * 3, 30)
+    work_candidates = get_activity_candidates('work', n_work_candidates)
     np.random.shuffle(work_candidates)
-    
-    # Find best home-work pair that preserves their distance.
-    # To avoid many users converging on the same pair, pick randomly among the top few pairs.
-    # Apply spatial constraint: only consider pairs within 0.5x to 1.5x of original distance
-    # This prevents selection of unrealistically distant pairs and stabilizes spatial scale
-    min_allowed_dist = 0.5 * imn_hw_dist
-    max_allowed_dist = 1.5 * imn_hw_dist
-    
-    pair_errors = []
-    # Use all candidates for pairing, not just first n_trials
-    for home_node in home_candidates[:n_trials * 2]:
-        for work_node in work_candidates[:n_trials * 2]:
-            if home_node == work_node:
+
+    # Helper to collect candidate home-work pairs for a given constraint range
+    def collect_pairs(min_factor: float, max_factor: float) -> List[Tuple[float, int, int]]:
+        local_pairs: List[Tuple[float, int, int]] = []
+        if imn_hw_dist <= 0:
+            return local_pairs
+        min_allowed = min_factor * imn_hw_dist
+        max_allowed = max_factor * imn_hw_dist if np.isfinite(max_factor) else None
+
+        if HAS_SKLEARN and len(work_candidates) > 0 and max_allowed is not None:
+            work_coords_rad = np.array([
+                [np.radians(target_osm.nodes[n]['y']), np.radians(target_osm.nodes[n]['x'])]
+                for n in work_candidates
+            ])
+            tree = BallTree(work_coords_rad, metric='haversine')
+            earth_radius_m = 6371000.0
+
+            for home_node in home_candidates[:n_trials * 2]:
+                home_lat = target_osm.nodes[home_node]['y']
+                home_lon = target_osm.nodes[home_node]['x']
+                home_coord_rad = np.array([[np.radians(home_lat), np.radians(home_lon)]])
+
+                max_radius_rad = max_allowed / earth_radius_m
+                indices, distances_rad = tree.query_radius(
+                    home_coord_rad,
+                    r=max_radius_rad,
+                    return_distance=True,
+                )
+
+                for idx, dist_rad in zip(indices[0], distances_rad[0]):
+                    work_node = work_candidates[idx]
+                    if home_node == work_node:
+                        continue
+                    dist_m = dist_rad * earth_radius_m
+                    if dist_m < min_allowed:
+                        continue
+
+                    base_error = abs(dist_m - imn_hw_dist)
+                    if dist_m > imn_hw_dist:
+                        error = base_error * 2.0
+                    else:
+                        error = base_error
+                    local_pairs.append((error, home_node, work_node))
+        else:
+            # Fallback to simple loop if sklearn/BallTree not available
+            fallback_work_candidates = get_activity_candidates('work', n_candidates)
+            np.random.shuffle(fallback_work_candidates)
+            for home_node in home_candidates[:n_trials * 2]:
+                for work_node in fallback_work_candidates[:n_trials * 2]:
+                    if home_node == work_node:
+                        continue
+                    osm_hw_dist = haversine_distance(
+                        target_osm.nodes[home_node]['x'],
+                        target_osm.nodes[home_node]['y'],
+                        target_osm.nodes[work_node]['x'],
+                        target_osm.nodes[work_node]['y'],
+                    )
+                    if max_allowed is not None:
+                        if osm_hw_dist < min_allowed or osm_hw_dist > max_allowed:
+                            continue
+                    else:
+                        if osm_hw_dist < min_allowed:
+                            continue
+
+                    base_error = abs(osm_hw_dist - imn_hw_dist)
+                    if osm_hw_dist > imn_hw_dist:
+                        error = base_error * 2.0
+                    else:
+                        error = base_error
+                    local_pairs.append((error, home_node, work_node))
+
+        return local_pairs
+
+    # Relaxed constraint strategy: try progressively looser ranges before fallback
+    pair_errors: List[Tuple[float, int, int]] = []
+    constraint_levels = [
+        (0.5, 1.5),   # original window
+        (0.25, 2.0),  # looser window
+        (0.0, np.inf) # no constraint (except home != work)
+    ]
+    for min_f, max_f in constraint_levels:
+        pair_errors = collect_pairs(min_f, max_f)
+        if pair_errors:
+            break
+
+    # Fallback if still no pairs (very unlikely with relaxed constraints)
+    if not pair_errors:
+        best_home = home_candidates[0] if home_candidates else nodes[0]
+        # Choose closest work node in terms of distance error (no constraint)
+        if activity_pools and 'work' in activity_pools and len(activity_pools['work']) > 0:
+            candidate_pool = activity_pools['work']
+        else:
+            candidate_pool = nodes
+        best_work = None
+        best_hw_error = float('inf')
+        for work_node in candidate_pool:
+            if work_node == best_home:
                 continue
-            osm_hw_dist = haversine_distance(
-                target_osm.nodes[home_node]['x'],
-                target_osm.nodes[home_node]['y'],
+            d_osm = haversine_distance(
+                target_osm.nodes[best_home]['x'],
+                target_osm.nodes[best_home]['y'],
                 target_osm.nodes[work_node]['x'],
                 target_osm.nodes[work_node]['y'],
             )
-            
-            # Spatial constraint: skip pairs outside the allowed range
-            if osm_hw_dist < min_allowed_dist or osm_hw_dist > max_allowed_dist:
-                continue
-            
-            # Directional penalty: apply stronger penalty when overshooting (d_osm > d_imn)
-            # This counteracts geometric bias where more ways exist to overshoot than undershoot
-            base_error = abs(osm_hw_dist - imn_hw_dist)
-            if osm_hw_dist > imn_hw_dist:
-                # Overshooting: apply 2x penalty to discourage selecting longer distances
-                error = base_error * 2.0
-            else:
-                # Undershooting: use base error (no extra penalty)
-                error = base_error
-            
-            pair_errors.append((error, home_node, work_node))
-    if not pair_errors:
-        best_home = home_candidates[0] if home_candidates else nodes[0]
-        best_work = work_candidates[0] if work_candidates else nodes[1]
-        best_hw_error = 0.0  # No error if no pairs found
+            base_error = abs(d_osm - imn_hw_dist)
+            error = base_error * 2.0 if d_osm > imn_hw_dist else base_error
+            if error < best_hw_error:
+                best_hw_error = error
+                best_work = work_node
+        if best_work is None:
+            best_work = candidate_pool[0] if candidate_pool else nodes[0]
     else:
         pair_errors.sort(key=lambda x: x[0])
-        # Use a larger top_k (top 20% or at least 20 pairs) to ensure diversity across users
-        # This prevents many users from converging to the same optimal pair
-        # Add small random noise to error to break ties for identical distances
         if random_seed is not None:
-            # Add tiny random perturbation to break ties (0-1% of error)
-            pair_errors = [(err * (1.0 + np.random.random() * 0.01), h, w) 
-                          for err, h, w in pair_errors]
+            pair_errors = [
+                (err * (1.0 + np.random.random() * 0.01), h, w)
+                for err, h, w in pair_errors
+            ]
             pair_errors.sort(key=lambda x: x[0])
-        
-        top_k = max(20, min(len(pair_errors) // 5, 100))  # Top 20% or at least 20, max 100
+
+        top_k = max(20, min(len(pair_errors) // 5, 100))
         top_k = min(top_k, len(pair_errors))
         choice_idx = np.random.randint(top_k)
         best_hw_error, best_home, best_work = pair_errors[choice_idx]

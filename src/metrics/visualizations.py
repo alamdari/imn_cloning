@@ -543,6 +543,61 @@ def plot_distribution_comparison(synthetic_stats: pd.DataFrame,
     plt.close()
     print(f"  ✓ Saved: length_comparison_overlay.png")
     
+    # 2b. Path Length Comparison (separate folder) - actual path traveled along roads
+    # Create separate folder for path length plots
+    path_output_dir = os.path.join(output_dir, 'od_distance_plots')
+    os.makedirs(path_output_dir, exist_ok=True)
+    
+    # Use path_length_meters (actual path traveled) instead of od_distance_meters.
+    # Use the SAME number of bins (50) and SAME range (len_min, len_max) as length_comparison_overlay.png
+    # so the histograms are directly comparable on the same x‑axis scale.
+    if 'path_length_meters' in synthetic_stats.columns and 'path_length_meters' in original_stats.columns:
+        syn_path_km = synthetic_stats['path_length_meters'] / 1000.0
+        orig_path_km = original_stats['path_length_meters'] / 1000.0
+        
+        # Use SAME bins (range and count) as OD distance plot for direct comparison
+        # This allows side-by-side comparison on the same x-axis scale
+        # Note: Path lengths are typically 1.2-1.5x OD distances, so some values may exceed len_max
+        # and will be grouped in the rightmost bin (this is expected and correct)
+        path_bins = len_bins
+        path_min, path_max = len_min, len_max
+        
+        # Verify data integrity: path_length should always be >= od_distance
+        syn_path_lt_od = (syn_path_km < syn_len_km).sum()
+        orig_path_lt_od = (orig_path_km < orig_len_km).sum()
+        if syn_path_lt_od > 0 or orig_path_lt_od > 0:
+            print(f"  ⚠ WARNING: {syn_path_lt_od} synthetic and {orig_path_lt_od} original path_length values are less than od_distance (data error!)")
+        
+        # Count how many path_length values exceed the OD distance range
+        syn_exceed = (syn_path_km > len_max).sum()
+        orig_exceed = (orig_path_km > len_max).sum()
+        if syn_exceed > 0 or orig_exceed > 0:
+            print(f"  Note: {syn_exceed} synthetic and {orig_exceed} original path_length values exceed OD distance range (will be in rightmost bin)")
+        
+        # Overlay version for path length
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.hist(orig_path_km, bins=path_bins, range=(path_min, path_max), 
+                edgecolor='black', alpha=0.6, color='blue', 
+                label=f'Original ({source_city.upper()})')
+        ax.hist(syn_path_km, bins=path_bins, range=(path_min, path_max), 
+                edgecolor='black', alpha=0.6, color='green', 
+                label=f'Synthetic ({target_city.upper()})')
+        ax.set_xlabel('Path Length (km)', fontsize=12)
+        ax.set_ylabel('Frequency', fontsize=12)
+        ax.set_title('Path Length Comparison (Overlay)', fontsize=14, fontweight='bold')
+        ax.axvline(orig_path_km.mean(), color='blue', linestyle='--', alpha=0.7, 
+                  label=f'Original Mean: {orig_path_km.mean():.2f} km')
+        ax.axvline(syn_path_km.mean(), color='green', linestyle='--', alpha=0.7, 
+                  label=f'Synthetic Mean: {syn_path_km.mean():.2f} km')
+        ax.legend()
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(os.path.join(path_output_dir, 'od_distance_comparison_overlay.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"  ✓ Saved: od_distance_plots/od_distance_comparison_overlay.png")
+    else:
+        print(f"  ⚠ path_length_meters column not found, skipping path length comparison")
+    
     # 3. Temporal Distribution Comparison
     if 'start_hour' in original_stats.columns and 'start_hour' in synthetic_stats.columns:
         # Shared bins for temporal (always 0-24)
