@@ -66,6 +66,11 @@ def simulate_synthetic_trips(
     # Get fixed home and work nodes
     home_node = fixed_home_node if fixed_home_node is not None else map_loc_imn.get(imn['home'])
     work_node = fixed_work_node if fixed_work_node is not None else map_loc_imn.get(imn['work'])
+    # Skip days with only one stay - no trips can be generated (need at least 2 stays for a trip)
+    # Check early to avoid unnecessary node assignment
+    if len(synthetic_stays) < 2:
+        return None, {}, {}, 0.0, []
+    
     all_nodes = list(G.nodes())
     
     # Assign OSM nodes to each stay
