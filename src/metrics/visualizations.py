@@ -217,7 +217,7 @@ def plot_origin_density_interactive_map(trajectory_stats: pd.DataFrame, output_p
         return
     
     # Import spatial stats for grid assignment
-    from .spatial_stats import assign_to_grid
+    from .spatial_stats import assign_to_grid, compute_global_reference_origin
     
     # Calculate map center
     center_lat = trajectory_stats['origin_lat'].mean()
@@ -230,13 +230,17 @@ def plot_origin_density_interactive_map(trajectory_stats: pd.DataFrame, output_p
         tiles='OpenStreetMap'
     )
     
+    # Compute global reference origin from all coordinates for consistency with other metrics
+    # This ensures grid (0,0) represents the same physical cell across all visualizations
+    ref_lat, ref_lon = compute_global_reference_origin(trajectory_stats)
+    
     # Aggregate origins by grid cell
     from collections import defaultdict
     cell_counts = defaultdict(int)
     cell_coords = {}  # Store representative lat/lon for each cell
     
     for _, row in trajectory_stats.iterrows():
-        cell = assign_to_grid(row['origin_lat'], row['origin_lon'], grid_size_m)
+        cell = assign_to_grid(row['origin_lat'], row['origin_lon'], grid_size_m, ref_lat, ref_lon)
         cell_counts[cell] += 1
         if cell not in cell_coords:
             cell_coords[cell] = (row['origin_lat'], row['origin_lon'])
@@ -254,22 +258,22 @@ def plot_origin_density_interactive_map(trajectory_stats: pd.DataFrame, output_p
     
     # Approximate conversion for grid cell boundaries
     meters_per_degree_lat = 111000.0
+    # Use reference latitude for consistent lon conversion
+    meters_per_degree_lon = 111000.0 * np.cos(np.radians(ref_lat))
+    
+    # Cell size in degrees
+    lat_offset = grid_size_m / meters_per_degree_lat
+    lon_offset = grid_size_m / meters_per_degree_lon
     
     for cell, count in cell_counts.items():
         cell_x, cell_y = cell
-        # Get representative coordinates
-        rep_lat, rep_lon = cell_coords[cell]
-        meters_per_degree_lon = 111000.0 * np.cos(np.radians(rep_lat))
         
-        # Calculate cell boundaries
-        lat_offset = grid_size_m / meters_per_degree_lat
-        lon_offset = grid_size_m / meters_per_degree_lon
-        
-        # Calculate corner coordinates of the grid cell
-        min_lat = cell_y * grid_size_m / meters_per_degree_lat
-        max_lat = (cell_y + 1) * grid_size_m / meters_per_degree_lat
-        min_lon = cell_x * grid_size_m / meters_per_degree_lon
-        max_lon = (cell_x + 1) * grid_size_m / meters_per_degree_lon
+        # Convert grid indices back to lat/lon using reference origin
+        # Calculate cell boundaries: bottom-left and top-right corners
+        min_lat = ref_lat + cell_y * lat_offset
+        max_lat = ref_lat + (cell_y + 1) * lat_offset
+        min_lon = ref_lon + cell_x * lon_offset
+        max_lon = ref_lon + (cell_x + 1) * lon_offset
         
         # Normalize count to 0-1 for color intensity
         if max_count > min_count:

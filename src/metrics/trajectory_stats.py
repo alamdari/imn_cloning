@@ -58,11 +58,14 @@ def compute_trip_length(df: pd.DataFrame) -> pd.Series:
     Returns:
         Series with trajectory_id as index and length in meters
     """
-    grouped = df.groupby('trajectory_id')
+    # Sort by time to ensure first/last are chronologically correct
+    df_sorted = df.sort_values(['trajectory_id', 'time']).reset_index(drop=True)
+    grouped = df_sorted.groupby('trajectory_id')
     
     def get_od_distance(group):
         if len(group) < 2:
             return 0.0
+        # After sorting, first is earliest, last is latest
         first = group.iloc[0]
         last = group.iloc[-1]
         return haversine_distance(first['lat'], first['lon'], 
@@ -82,11 +85,14 @@ def compute_trip_path_length(df: pd.DataFrame) -> pd.Series:
     Returns:
         Series with trajectory_id as index and total path length in meters
     """
-    grouped = df.groupby('trajectory_id')
+    # Sort by time to ensure points are in chronological order
+    df_sorted = df.sort_values(['trajectory_id', 'time']).reset_index(drop=True)
+    grouped = df_sorted.groupby('trajectory_id')
     
     def get_path_length(group):
         if len(group) < 2:
             return 0.0
+        # After sorting, coords are in chronological order
         coords = group[['lat', 'lon']].values
         total_dist = 0.0
         for i in range(len(coords) - 1):
@@ -178,12 +184,16 @@ def extract_temporal_features(df: pd.DataFrame, city_name: Optional[str] = None)
                 converted_times.append(unix_time)
             
             start_times = pd.Series(converted_times, index=start_times.index)
+            # After conversion, start_times are now Unix timestamps, not relative
+            is_relative_time = False
         except Exception as e:
             # If conversion fails, use a fixed reference (April 3, 2007) in UTC
             print(f"  ⚠ Warning: Could not parse day_date, using fixed reference date. Error: {e}")
             # April 3, 2007 00:00:00 UTC
             reference_ts = 1175558400  # Fixed UTC timestamp for April 3, 2007 midnight UTC
             start_times = start_times + reference_ts
+            # After conversion, start_times are now Unix timestamps, not relative
+            is_relative_time = False
     
     # If times are relative (<100000), compute start_hour directly from relative seconds.
     # Relative times are already in seconds since day start, so just convert to hours modulo 24.
@@ -208,7 +218,7 @@ def extract_temporal_features(df: pd.DataFrame, city_name: Optional[str] = None)
 
         temporal_features = pd.DataFrame({
             'trajectory_id': start_times.index,
-            'start_time': start_times.values,  # keep as relative seconds
+            'start_time': start_times.values,  # relative seconds (not converted to Unix)
             'start_hour': start_hours,
             'start_day_of_week': start_dows,
         })
@@ -285,7 +295,9 @@ def compute_trajectory_statistics(df: pd.DataFrame, city_name: Optional[str] = N
     temporal_features = extract_temporal_features(df, city_name=city_name)
     
     # Extract origin and destination coordinates
-    grouped = df.groupby('trajectory_id')
+    # Sort by time to ensure first/last are chronologically correct
+    df_sorted = df.sort_values(['trajectory_id', 'time']).reset_index(drop=True)
+    grouped = df_sorted.groupby('trajectory_id')
     origins = grouped[['lat', 'lon']].first().rename(columns={'lat': 'origin_lat', 'lon': 'origin_lon'})
     destinations = grouped[['lat', 'lon']].last().rename(columns={'lat': 'dest_lat', 'lon': 'dest_lon'})
     

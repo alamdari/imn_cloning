@@ -17,7 +17,8 @@ from .spatial_stats import (
     compute_od_matrix, 
     compute_origin_density, 
     compute_destination_density,
-    compute_spatial_coverage
+    compute_spatial_coverage,
+    compute_global_reference_origin
 )
 from .visualizations import (
     plot_trip_duration_distribution,
@@ -227,7 +228,9 @@ def compute_path_metrics(df: pd.DataFrame, G, trajectory_type: str = "unknown") 
     Returns:
         DataFrame with metrics for each trip
     """
-    grouped = df.groupby('trajectory_id')
+    # Sort by time to ensure points are in chronological order
+    df_sorted = df.sort_values(['trajectory_id', 'time']).reset_index(drop=True)
+    grouped = df_sorted.groupby('trajectory_id')
     metrics = []
     total_trips = len(grouped)
     
@@ -245,7 +248,7 @@ def compute_path_metrics(df: pd.DataFrame, G, trajectory_type: str = "unknown") 
         if len(group) < 2:
             continue
         
-        # Get origin and destination
+        # Get origin and destination (after sorting, first is earliest, last is latest)
         origin = group.iloc[0]
         dest = group.iloc[-1]
         origin_lat, origin_lon = origin['lat'], origin['lon']
@@ -255,6 +258,7 @@ def compute_path_metrics(df: pd.DataFrame, G, trajectory_type: str = "unknown") 
         straight_line_dist = haversine_distance(origin_lat, origin_lon, dest_lat, dest_lon)
         
         # 2. Actual path length (sum of all segments)
+        # After sorting, coords are in chronological order
         coords = group[['lat', 'lon']].values
         actual_path_length = 0.0
         for i in range(len(coords) - 1):
@@ -364,9 +368,14 @@ def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m:
     
     # Compute spatial metrics
     print("Computing spatial metrics...")
-    od_matrix = compute_od_matrix(combined_stats, grid_size_m)
-    origin_density = compute_origin_density(combined_stats, grid_size_m)
-    dest_density = compute_destination_density(combined_stats, grid_size_m)
+    # Compute global reference origin once for consistency across all metrics
+    # This ensures grid (0,0) represents the same physical cell in OD matrix, density maps, etc.
+    ref_lat, ref_lon = compute_global_reference_origin(combined_stats)
+    print(f"  → Global reference origin: ({ref_lat:.6f}, {ref_lon:.6f})")
+    
+    od_matrix = compute_od_matrix(combined_stats, grid_size_m, ref_lat, ref_lon)
+    origin_density = compute_origin_density(combined_stats, grid_size_m, ref_lat, ref_lon)
+    dest_density = compute_destination_density(combined_stats, grid_size_m, ref_lat, ref_lon)
     spatial_coverage = compute_spatial_coverage(combined_stats)
     
     # Save spatial metrics
