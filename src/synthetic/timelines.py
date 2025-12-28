@@ -52,7 +52,7 @@ def build_stay_distributions(stays_by_day: Dict) -> Tuple[Dict, Dict, Any]:
     return duration_probs, transition_probs, trip_duration_probs
 
 
-def generate_synthetic_day(original_stays, duration_probs: Dict, transition_probs: Dict, randomness: float = 0.5, day_length: int = 24 * 3600, tz=None) -> List[Tuple[str, int, int]]:
+def generate_synthetic_day(original_stays, duration_probs: Dict, transition_probs: Dict, randomness: float = 0.5, day_length: int = 24 * 3600, tz=None, is_first_day: bool = False) -> List[Tuple[str, int, int]]:
     if not original_stays:
         return []
     first_dt = datetime.fromtimestamp(original_stays[0].start_time, tz)
@@ -78,7 +78,9 @@ def generate_synthetic_day(original_stays, duration_probs: Dict, transition_prob
         delta_dur = 0
     pert_start = max(0, min(anchor_rel_start + delta_start, day_length))
     pert_dur = max(1, anchor_orig_dur + delta_dur)
-    if rel_stays and rel_stays[0][0] is anchor_stay:
+    # Only force anchor to start at 0 if it's the first stay AND it's NOT the first day
+    # On the first day, preserve the original anchor start time
+    if rel_stays and rel_stays[0][0] is anchor_stay and not is_first_day:
         pert_start = 0
     pert_end = min(pert_start + pert_dur, day_length)
     if pert_end > day_length:
@@ -86,10 +88,12 @@ def generate_synthetic_day(original_stays, duration_probs: Dict, transition_prob
         pert_dur = max(1, pert_end - pert_start)
     synthetic_stays = []
     # Start at the first original stay's start time; if it's after midnight, add a home stay from 0 to that time.
+    # BUT: Only create artificial home stay if this is NOT the first day of the user's mobility timeline.
+    # On the first day, the user's mobility simply starts when it starts - no artificial home stay needed.
     first_rel_start = rel_stays[0][1] if rel_stays else 0
     current_time = first_rel_start
     prev_activity = "home"
-    if first_rel_start > 0:
+    if first_rel_start > 0 and not is_first_day:
         synthetic_stays.append(("home", 0, first_rel_start))
     for (s, rel_start, rel_end) in rel_stays:
         if s is anchor_stay:
@@ -162,7 +166,8 @@ def generate_synthetic_day(original_stays, duration_probs: Dict, transition_prob
     def _stretch_anchor_aware(
         stays_rel: List[Tuple[str, int, int]],
         anchor_tuple: Tuple[str, int, int],
-        total_len: int
+        total_len: int,
+        is_first_day: bool = False
     ) -> List[Tuple[str, int, int]]:
         """Stretch stays to cover full day while preserving anchor timing."""
         if not stays_rel:
@@ -178,12 +183,17 @@ def generate_synthetic_day(original_stays, duration_probs: Dict, transition_prob
                 break
 
         # Ensure the first stay starts at 0 if it's not the anchor
+        # BUT: On the first day, don't force first stay to start at 0 - preserve original start time
         out: List[Tuple[str, int, int]] = []
         act0, s0, e0 = ordered[0]
         if anchor_idx == 0:
             # Keep anchor unchanged; do not force start to 0
             out.append((act0, s0, e0))
+        elif is_first_day:
+            # On first day, preserve original start time - don't force to 0
+            out.append((act0, s0, e0))
         else:
+            # On subsequent days, force first stay to start at 0 if not anchor
             s0 = 0
             e0 = max(0, min(e0, total_len))
             if e0 < s0:
@@ -224,13 +234,16 @@ def generate_synthetic_day(original_stays, duration_probs: Dict, transition_prob
         return out
 
     anchor_tuple = (anchor_stay.activity_label, pert_start, pert_end)
-    synthetic_stays = _stretch_anchor_aware(synthetic_stays, anchor_tuple, day_length)
+    synthetic_stays = _stretch_anchor_aware(synthetic_stays, anchor_tuple, day_length, is_first_day)
     return synthetic_stays
 
 
 def prepare_day_data(stays_by_day: Dict, user_duration_probs: Dict, user_transition_probs: Dict, randomness_levels: List[float], tz) -> Dict:
     from datetime import datetime
     day_data = {}
+    # Determine the first day of the user's mobility timeline
+    first_day = min(stays_by_day.keys()) if stays_by_day else None
+    
     for day_date in sorted(stays_by_day.keys()):
         day = stays_by_day[day_date]
         first_dt = datetime.fromtimestamp(day[0].start_time, tz)
@@ -241,9 +254,12 @@ def prepare_day_data(stays_by_day: Dict, user_duration_probs: Dict, user_transit
             (s.activity_label, int(s.start_time - day_start), int(s.end_time - day_start))
             for s in day if (s.start_time is not None and s.end_time is not None)
         ]
+        # Check if this is the first day of the user's mobility timeline
+        is_first_day = (day_date == first_day) if first_day is not None else False
+        
         synthetic_dict = {}
         for r in randomness_levels:
-            synthetic = generate_synthetic_day(day, user_duration_probs, user_transition_probs, randomness=r, tz=tz)
+            synthetic = generate_synthetic_day(day, user_duration_probs, user_transition_probs, randomness=r, tz=tz, is_first_day=is_first_day)
             synthetic_dict[r] = synthetic
         anchor = find_anchor_stay_for_day(day)
         anchor_tuple = None
