@@ -39,15 +39,15 @@ def plot_trip_duration_distribution(trajectory_stats: pd.DataFrame, output_path:
 
 def plot_trip_length_distribution(trajectory_stats: pd.DataFrame, output_path: str):
     """
-    Plot histogram of trip lengths (OD distance).
+    Plot histogram of OD distances (Origin-Destination straight-line distance).
     """
     lengths_km = trajectory_stats['od_distance_meters'] / 1000.0
     
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.hist(lengths_km, bins=50, edgecolor='black', alpha=0.7)
-    ax.set_xlabel('Trip Length (km)', fontsize=12)
+    ax.set_xlabel('OD Distance (km)', fontsize=12)
     ax.set_ylabel('Frequency', fontsize=12)
-    ax.set_title('Distribution of Trip Lengths (Origin-Destination Distance)', fontsize=14, fontweight='bold')
+    ax.set_title('Distribution of OD Distances (Origin-Destination Straight-Line)', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3)
     
     # Add statistics
@@ -65,14 +65,14 @@ def plot_trip_length_distribution(trajectory_stats: pd.DataFrame, output_path: s
 
 def plot_trip_length_boxplot(all_user_stats: Dict[int, pd.DataFrame], output_path: str):
     """
-    Box-whisker plot of trip lengths across all users.
+    Box-whisker plot of OD distances across all users.
     """
     # Prepare data
     data_for_plot = []
     for user_id, stats in all_user_stats.items():
         lengths_km = stats['od_distance_meters'] / 1000.0
         for length in lengths_km:
-            data_for_plot.append({'user_id': user_id, 'trip_length_km': length})
+            data_for_plot.append({'user_id': user_id, 'od_distance_km': length})
     
     df_plot = pd.DataFrame(data_for_plot)
     
@@ -81,7 +81,7 @@ def plot_trip_length_boxplot(all_user_stats: Dict[int, pd.DataFrame], output_pat
     # If too many users, aggregate
     if len(all_user_stats) > 20:
         # Show overall distribution
-        ax.boxplot(df_plot['trip_length_km'], vert=True, widths=0.5)
+        ax.boxplot(df_plot['od_distance_km'], vert=True, widths=0.5)
         ax.set_xlabel('All Users', fontsize=12)
     else:
         # Show per-user boxplots
@@ -91,8 +91,8 @@ def plot_trip_length_boxplot(all_user_stats: Dict[int, pd.DataFrame], output_pat
         ax.set_xlabel('User ID', fontsize=12)
         plt.xticks(rotation=45)
     
-    ax.set_ylabel('Trip Length (km)', fontsize=12)
-    ax.set_title('Distribution of Trip Lengths Across Users', fontsize=14, fontweight='bold')
+    ax.set_ylabel('OD Distance (km)', fontsize=12)
+    ax.set_title('Distribution of OD Distances Across Users', fontsize=14, fontweight='bold')
     ax.grid(True, alpha=0.3, axis='y')
     
     plt.tight_layout()
@@ -496,7 +496,7 @@ def plot_distribution_comparison(synthetic_stats: pd.DataFrame,
     plt.close()
     print(f"  ✓ Saved: duration_comparison_overlay.png")
     
-    # 2. Trip Length Comparison
+    # 2. OD Distance Comparison (Origin-Destination straight-line distance)
     syn_len_km = synthetic_stats['od_distance_meters'] / 1000.0
     orig_len_km = original_stats['od_distance_meters'] / 1000.0
     
@@ -509,51 +509,51 @@ def plot_distribution_comparison(synthetic_stats: pd.DataFrame,
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
     
     ax1.hist(orig_len_km, bins=len_bins, range=(len_min, len_max), edgecolor='black', alpha=0.7, color='blue')
-    ax1.set_xlabel('Trip Length (km)', fontsize=12)
+    ax1.set_xlabel('OD Distance (km)', fontsize=12)
     ax1.set_ylabel('Frequency', fontsize=12)
-    ax1.set_title('Original City - Trip Length', fontsize=14, fontweight='bold')
+    ax1.set_title('Original City - OD Distance (Straight-Line)', fontsize=14, fontweight='bold')
     ax1.axvline(orig_len_km.mean(), color='red', linestyle='--', 
                 label=f'Mean: {orig_len_km.mean():.2f} km')
     ax1.legend()
     ax1.grid(True, alpha=0.3)
     
     ax2.hist(syn_len_km, bins=len_bins, range=(len_min, len_max), edgecolor='black', alpha=0.7, color='green')
-    ax2.set_xlabel('Trip Length (km)', fontsize=12)
+    ax2.set_xlabel('OD Distance (km)', fontsize=12)
     ax2.set_ylabel('Frequency', fontsize=12)
-    ax2.set_title(f'Target City ({target_city.upper()}) - Trip Length', fontsize=14, fontweight='bold')
+    ax2.set_title(f'Target City ({target_city.upper()}) - OD Distance (Straight-Line)', fontsize=14, fontweight='bold')
     ax2.axvline(syn_len_km.mean(), color='red', linestyle='--', 
                 label=f'Mean: {syn_len_km.mean():.2f} km')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
     
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'length_comparison.png'), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, 'od_distance_comparison.png'), dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"  ✓ Saved: length_comparison.png")
+    print(f"  ✓ Saved: od_distance_comparison.png")
     
     # Overlay version
     fig, ax = plt.subplots(figsize=(10, 6))
     ax.hist(orig_len_km, bins=len_bins, range=(len_min, len_max), edgecolor='black', alpha=0.6, color='blue', label=f'Original ({source_city.upper()})')
     ax.hist(syn_len_km, bins=len_bins, range=(len_min, len_max), edgecolor='black', alpha=0.6, color='green', label=f'Synthetic ({target_city.upper()})')
-    ax.set_xlabel('Trip Length (km)', fontsize=12)
+    ax.set_xlabel('OD Distance (km)', fontsize=12)
     ax.set_ylabel('Frequency', fontsize=12)
-    ax.set_title('Trip Length Comparison (Overlay)', fontsize=14, fontweight='bold')
+    ax.set_title('OD Distance Comparison (Overlay) - Straight-Line Distance', fontsize=14, fontweight='bold')
     ax.axvline(orig_len_km.mean(), color='blue', linestyle='--', alpha=0.7, label=f'Original Mean: {orig_len_km.mean():.2f} km')
     ax.axvline(syn_len_km.mean(), color='green', linestyle='--', alpha=0.7, label=f'Synthetic Mean: {syn_len_km.mean():.2f} km')
     ax.legend()
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, 'length_comparison_overlay.png'), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, 'od_distance_comparison_overlay.png'), dpi=300, bbox_inches='tight')
     plt.close()
-    print(f"  ✓ Saved: length_comparison_overlay.png")
+    print(f"  ✓ Saved: od_distance_comparison_overlay.png")
     
-    # 2b. Path Length Comparison (separate folder) - actual path traveled along roads
+    # 2b. Path Length Comparison - actual path traveled along roads
     # Create separate folder for path length plots
-    path_output_dir = os.path.join(output_dir, 'od_distance_plots')
+    path_output_dir = os.path.join(output_dir, 'path_length_plots')
     os.makedirs(path_output_dir, exist_ok=True)
     
     # Use path_length_meters (actual path traveled) instead of od_distance_meters.
-    # Use the SAME number of bins (50) and SAME range (len_min, len_max) as length_comparison_overlay.png
+    # Use the SAME number of bins (50) and SAME range (len_min, len_max) as od_distance_comparison_overlay.png
     # so the histograms are directly comparable on the same x‑axis scale.
     if 'path_length_meters' in synthetic_stats.columns and 'path_length_meters' in original_stats.columns:
         syn_path_km = synthetic_stats['path_length_meters'] / 1000.0
@@ -567,8 +567,17 @@ def plot_distribution_comparison(synthetic_stats: pd.DataFrame,
         path_min, path_max = len_min, len_max
         
         # Verify data integrity: path_length should always be >= od_distance
-        syn_path_lt_od = (syn_path_km < syn_len_km).sum()
-        orig_path_lt_od = (orig_path_km < orig_len_km).sum()
+        # Compare by trajectory_id, not by position (merge on trajectory_id first)
+        syn_merged = synthetic_stats[['trajectory_id', 'od_distance_meters', 'path_length_meters']].copy()
+        syn_merged['od_km'] = syn_merged['od_distance_meters'] / 1000.0
+        syn_merged['path_km'] = syn_merged['path_length_meters'] / 1000.0
+        syn_path_lt_od = (syn_merged['path_km'] < syn_merged['od_km']).sum()
+        
+        orig_merged = original_stats[['trajectory_id', 'od_distance_meters', 'path_length_meters']].copy()
+        orig_merged['od_km'] = orig_merged['od_distance_meters'] / 1000.0
+        orig_merged['path_km'] = orig_merged['path_length_meters'] / 1000.0
+        orig_path_lt_od = (orig_merged['path_km'] < orig_merged['od_km']).sum()
+        
         if syn_path_lt_od > 0 or orig_path_lt_od > 0:
             print(f"  ⚠ WARNING: {syn_path_lt_od} synthetic and {orig_path_lt_od} original path_length values are less than od_distance (data error!)")
         
@@ -588,7 +597,7 @@ def plot_distribution_comparison(synthetic_stats: pd.DataFrame,
                 label=f'Synthetic ({target_city.upper()})')
         ax.set_xlabel('Path Length (km)', fontsize=12)
         ax.set_ylabel('Frequency', fontsize=12)
-        ax.set_title('Path Length Comparison (Overlay)', fontsize=14, fontweight='bold')
+        ax.set_title('Path Length Comparison (Overlay) - Actual Distance Traveled', fontsize=14, fontweight='bold')
         ax.axvline(orig_path_km.mean(), color='blue', linestyle='--', alpha=0.7, 
                   label=f'Original Mean: {orig_path_km.mean():.2f} km')
         ax.axvline(syn_path_km.mean(), color='green', linestyle='--', alpha=0.7, 
@@ -596,9 +605,9 @@ def plot_distribution_comparison(synthetic_stats: pd.DataFrame,
         ax.legend()
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.savefig(os.path.join(path_output_dir, 'od_distance_comparison_overlay.png'), dpi=300, bbox_inches='tight')
+        plt.savefig(os.path.join(path_output_dir, 'path_length_comparison_overlay.png'), dpi=300, bbox_inches='tight')
         plt.close()
-        print(f"  ✓ Saved: od_distance_plots/od_distance_comparison_overlay.png")
+        print(f"  ✓ Saved: path_length_plots/path_length_comparison_overlay.png")
     else:
         print(f"  ⚠ path_length_meters column not found, skipping path length comparison")
     

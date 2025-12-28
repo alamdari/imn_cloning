@@ -630,7 +630,7 @@ def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m:
             print(f"      Synthetic - Mean: {synthetic_path_metrics['efficiency'].mean():.3f}, "
                   f"Median: {synthetic_path_metrics['efficiency'].median():.3f}")
             
-            print(f"\n    Note: 'straight_line_distance' should match 'od_distance_meters' in length_comparison.png")
+            print(f"\n    Note: 'straight_line_distance' should match 'od_distance_meters' in od_distance_comparison.png")
             print(f"          'actual_path_length' is the sum of all GPS segments (always >= straight_line_distance)")
             
         except Exception as e:
@@ -668,8 +668,9 @@ def generate_quality_report(trajectories_dir: str, output_dir: str, grid_size_m:
         print(f"  Comparison Plots (Original vs Synthetic):")
         print(f"    - duration_comparison.png (side-by-side)")
         print(f"    - duration_comparison_overlay.png (overlay with alpha)")
-        print(f"    - length_comparison.png (side-by-side)")
-        print(f"    - length_comparison_overlay.png (overlay with alpha)")
+        print(f"    - od_distance_comparison.png (side-by-side)")
+        print(f"    - od_distance_comparison_overlay.png (overlay with alpha)")
+        print(f"    - path_length_plots/path_length_comparison_overlay.png (overlay)")
         print(f"    - temporal_comparison.png (side-by-side)")
         print(f"    - temporal_comparison_overlay.png (overlay with alpha)")
     else:
