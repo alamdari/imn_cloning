@@ -50,14 +50,34 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_leve
     )
     fixed_home = map_loc_imn_user.get(enriched['home'])
     fixed_work = map_loc_imn_user.get(enriched['work'])
-    print(f"  ↳ RMSE for user {user_id}: {rmse_user:.2f} km")
+    print(f"  ↳ Relative RMSE for user {user_id}: {rmse_user:.2f}")
 
     per_day_outputs: Dict[Any, Dict[str, Any]] = {}
     combined_traj: List[Tuple[int, float, float, int, str]] = []
     any_success = False
     trajectory_id = 0
+    
+    # Track locations used across ALL days for global diversity enforcement
+    # This ensures we use all mapped locations over the entire timeline, not just per-day
+    global_used_locations_per_activity: Dict[str, set] = {}
+    
+    # Calculate total diversity requirements: count distinct locations per activity across ALL original days
+    from collections import defaultdict
+    global_diversity_requirements: Dict[str, int] = {}
+    for day_stays in stays_by_day.values():
+        for stay in day_stays:
+            if hasattr(stay, 'location_id') and hasattr(stay, 'activity_label'):
+                act = str(stay.activity_label).lower()
+                if act not in global_diversity_requirements:
+                    global_diversity_requirements[act] = set()
+                global_diversity_requirements[act].add(stay.location_id)
+    # Convert sets to counts
+    global_diversity_requirements = {act: len(loc_set) for act, loc_set in global_diversity_requirements.items()}
+    
     for some_day, ddata in day_data.items():
         synthetic_for_r = ddata["synthetic"].get(chosen_r, [])
+        # Get original stays for this day (for per-day analysis, but diversity is global)
+        original_day_stays = stays_by_day.get(some_day, [])
         traj, osm_usage, pseudo_map_loc, rmse, legs_coords = simulate_synthetic_trips(
             enriched,
             synthetic_for_r,
@@ -69,6 +89,9 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_leve
             precomputed_map_loc_rmse=(map_loc_imn_user, rmse_user),
             activity_pools=activity_pools,
             user_id=user_id,  # Pass user_id to ensure unique sampling per user
+            original_stays=original_day_stays,  # Pass original stays (for compatibility, but diversity is global)
+            global_used_locations=global_used_locations_per_activity,  # Pass global state
+            global_diversity_requirements=global_diversity_requirements,  # Pass global requirements
         )
         if traj is None:
             print(f"  ⚠ Spatial simulation failed for user {user_id} on day {some_day}")
@@ -166,7 +189,16 @@ def run_pipeline(paths: PathsConfig, randomness_levels: List[float], tz) -> None
 
     print(f"\nProcessing {len(imns)} users...")
     print("-" * 40)
+    
+    # # TEMPORARY: Only process user 12140 for testing diversity-aware sampling
+    # # TODO: Remove this condition after testing
+    # TEST_USER_ID = 12140
+    
     for idx, uid in enumerate(imns.keys(), 1):
+        # if uid != TEST_USER_ID:
+        #     print(f"[{idx}/{len(imns)}] Skipping user {uid} (only processing user {TEST_USER_ID} for testing)")
+        #     continue
+        
         print(f"[{idx}/{len(imns)}] ")
         try:
             process_single_user(uid, imns[uid], poi_data[uid], randomness_levels, paths, tz, G, gdf_cumulative_p, activity_pools, paths.use_random_mapping)

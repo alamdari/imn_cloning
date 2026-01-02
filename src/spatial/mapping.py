@@ -106,9 +106,15 @@ def map_imn_to_osm(imn, target_osm, n_trials=10, gdf_cumulative_p=None, activity
         # Fallback to population-weighted sampling
         return select_random_nodes(gdf_cumulative_p, n=n, all_nodes=nodes)
     
-    # Helper: compute squared distance error between two location pairs
+    # Helper: compute relative squared distance error between two location pairs
     def compute_distance_error(imn_loc1, imn_loc2, osm_node1, osm_node2) -> float:
-        """Compute squared error (km²) between IMN distance and OSM distance."""
+        """
+        Compute relative squared error between IMN distance and OSM distance.
+        
+        Uses relative error: ((dist_osm - dist_imn) / dist_imn)²
+        This makes short distances much more sensitive to distortion than long ones,
+        preserving the distance structure and preventing systematic outward drift.
+        """
         dist_imn = haversine_distance(
             imn['locations'][imn_loc1]['coordinates'][0],
             imn['locations'][imn_loc1]['coordinates'][1],
@@ -123,11 +129,37 @@ def map_imn_to_osm(imn, target_osm, n_trials=10, gdf_cumulative_p=None, activity
             target_osm.nodes[osm_node2]['y'],
         ) / 1000  # Convert to km
         
-        return (dist_osm - dist_imn) ** 2
+        # Use relative error: (Δdistance / original_distance)²
+        # This makes short distances much more sensitive to distortion
+        if dist_imn > 0:
+            relative_error = ((dist_osm - dist_imn) / dist_imn) ** 2
+        else:
+            # Fallback for zero distance: use absolute error
+            relative_error = (dist_osm - dist_imn) ** 2
+        
+        return relative_error
     
     # Step 1: Map home and work as anchor points
     home_id = imn['home']
     work_id = imn['work']
+    
+    # Compute IMN spatial scale: mean distance from home to all other locations
+    # This represents the overall spatial scale of the user's mobility
+    imn_scale = 0.0
+    home_coords = imn['locations'][home_id]['coordinates']
+    num_other_locs = 0
+    for loc_id, loc_data in imn['locations'].items():
+        if loc_id != home_id:
+            dist_from_home = haversine_distance(
+                home_coords[0], home_coords[1],
+                loc_data['coordinates'][0], loc_data['coordinates'][1]
+            ) / 1000.0  # Convert to km
+            imn_scale += dist_from_home
+            num_other_locs += 1
+    if num_other_locs > 0:
+        imn_scale = imn_scale / num_other_locs
+    else:
+        imn_scale = 0.0
     
     # Get home-work distance in source city
     imn_hw_dist = haversine_distance(
@@ -154,6 +186,29 @@ def map_imn_to_osm(imn, target_osm, n_trials=10, gdf_cumulative_p=None, activity
     work_candidates = get_activity_candidates('work', n_work_candidates)
     np.random.shuffle(work_candidates)
 
+    # Helper: compute scale penalty for a candidate home-work pair
+    def compute_scale_penalty(home_node: int, work_node: int) -> float:
+        """
+        Compute symmetric penalty for deviation from IMN scale.
+        Penalizes both expansion (too large) and collapse (too small).
+        Returns: ((osm_scale - imn_scale) / imn_scale)²
+        """
+        if imn_scale <= 0:
+            return 0.0
+        
+        # Compute OSM distance from home to work
+        osm_hw_dist_km = haversine_distance(
+            target_osm.nodes[home_node]['x'],
+            target_osm.nodes[home_node]['y'],
+            target_osm.nodes[work_node]['x'],
+            target_osm.nodes[work_node]['y'],
+        ) / 1000.0
+        
+        # For home-work pair, use work distance as initial scale estimate
+        # Symmetric penalty: penalize deviation in either direction
+        scale_deviation = (osm_hw_dist_km - imn_scale) / imn_scale
+        return scale_deviation ** 2  # Squared relative deviation
+    
     # Helper to collect candidate home-work pairs for a given constraint range
     def collect_pairs(min_factor: float, max_factor: float) -> List[Tuple[float, int, int]]:
         local_pairs: List[Tuple[float, int, int]] = []
@@ -190,11 +245,21 @@ def map_imn_to_osm(imn, target_osm, n_trials=10, gdf_cumulative_p=None, activity
                     if dist_m < min_allowed:
                         continue
 
-                    base_error = abs(dist_m - imn_hw_dist)
-                    if dist_m > imn_hw_dist:
-                        error = base_error * 2.0
+                    # Use relative error for home-work pair evaluation
+                    if imn_hw_dist > 0:
+                        relative_error = ((dist_m - imn_hw_dist) / imn_hw_dist) ** 2
                     else:
-                        error = base_error
+                        relative_error = abs(dist_m - imn_hw_dist)
+                    # Penalize longer distances more (preserve short distances)
+                    if dist_m > imn_hw_dist:
+                        error = relative_error * 2.0
+                    else:
+                        error = relative_error
+                    
+                    # Add scale regularization penalty
+                    scale_penalty = compute_scale_penalty(home_node, work_node)
+                    error += scale_penalty
+                    
                     local_pairs.append((error, home_node, work_node))
         else:
             # Fallback to simple loop if sklearn/BallTree not available
@@ -217,11 +282,21 @@ def map_imn_to_osm(imn, target_osm, n_trials=10, gdf_cumulative_p=None, activity
                         if osm_hw_dist < min_allowed:
                             continue
 
-                    base_error = abs(osm_hw_dist - imn_hw_dist)
-                    if osm_hw_dist > imn_hw_dist:
-                        error = base_error * 2.0
+                    # Use relative error for home-work pair evaluation
+                    if imn_hw_dist > 0:
+                        relative_error = ((osm_hw_dist - imn_hw_dist) / imn_hw_dist) ** 2
                     else:
-                        error = base_error
+                        relative_error = abs(osm_hw_dist - imn_hw_dist)
+                    # Penalize longer distances more (preserve short distances)
+                    if osm_hw_dist > imn_hw_dist:
+                        error = relative_error * 2.0
+                    else:
+                        error = relative_error
+                    
+                    # Add scale regularization penalty
+                    scale_penalty = compute_scale_penalty(home_node, work_node)
+                    error += scale_penalty
+                    
                     local_pairs.append((error, home_node, work_node))
 
         return local_pairs
@@ -257,8 +332,17 @@ def map_imn_to_osm(imn, target_osm, n_trials=10, gdf_cumulative_p=None, activity
                 target_osm.nodes[work_node]['x'],
                 target_osm.nodes[work_node]['y'],
             )
-            base_error = abs(d_osm - imn_hw_dist)
-            error = base_error * 2.0 if d_osm > imn_hw_dist else base_error
+            # Use relative error for home-work pair evaluation
+            if imn_hw_dist > 0:
+                relative_error = ((d_osm - imn_hw_dist) / imn_hw_dist) ** 2
+            else:
+                relative_error = abs(d_osm - imn_hw_dist)
+            error = relative_error * 2.0 if d_osm > imn_hw_dist else relative_error
+            
+            # Add scale regularization penalty
+            scale_penalty = compute_scale_penalty(best_home, work_node)
+            error += scale_penalty
+            
             if error < best_hw_error:
                 best_hw_error = error
                 best_work = work_node
@@ -281,8 +365,9 @@ def map_imn_to_osm(imn, target_osm, n_trials=10, gdf_cumulative_p=None, activity
     # Initialize mapping with home and work
     map_loc = {home_id: best_home, work_id: best_work}
     
-    # Track cumulative squared error for RMSE calculation
-    SE = (best_hw_error / 1000) ** 2  # Convert to km and square
+    # Track cumulative relative squared error for RMSE calculation
+    # best_hw_error is already a relative squared error, so use it directly
+    SE = best_hw_error
     
     # Step 2: Map remaining locations incrementally
     # Sort by frequency (visit more important locations first)
@@ -296,18 +381,90 @@ def map_imn_to_osm(imn, target_osm, n_trials=10, gdf_cumulative_p=None, activity
     for loc_id, loc_data in remaining_locs:
         activity_label = loc_data.get('activity_label', 'unknown')
         
-        # Get candidates for this activity type
-        candidates = get_activity_candidates(activity_label, n_trials)
+        # Compute original distance from home for this location
+        imn_dist_from_home_km = haversine_distance(
+            home_coords[0], home_coords[1],
+            loc_data['coordinates'][0], loc_data['coordinates'][1]
+        ) / 1000.0
+        
+        # For very short distances (<1 km), use distance-aware candidate filtering
+        # This prevents selecting candidates that are too far from home
+        candidates = get_activity_candidates(activity_label, n_trials * 10)  # Sample more for filtering
+        
+        if imn_dist_from_home_km < 1.0 and home_id in map_loc:
+            # Filter candidates to be within reasonable radius from home
+            # Use 5x the original distance as max radius (allows some flexibility)
+            max_radius_km = max(imn_dist_from_home_km * 5.0, 2.0)  # At least 2 km
+            max_radius_m = max_radius_km * 1000.0
+            
+            home_node = map_loc[home_id]
+            home_lat = target_osm.nodes[home_node]['y']
+            home_lon = target_osm.nodes[home_node]['x']
+            
+            # Filter candidates by distance from home
+            filtered_candidates = []
+            for candidate_node in candidates:
+                candidate_lat = target_osm.nodes[candidate_node]['y']
+                candidate_lon = target_osm.nodes[candidate_node]['x']
+                dist_m = haversine_distance(
+                    home_lat, home_lon,
+                    candidate_lat, candidate_lon
+                )
+                if dist_m <= max_radius_m:
+                    filtered_candidates.append(candidate_node)
+            
+            # If filtering removed all candidates, use original candidates (fallback)
+            if filtered_candidates:
+                candidates = filtered_candidates[:n_trials * 3]  # Limit to reasonable number
+            # else: keep original candidates as fallback
+        else:
+            # For longer distances, use standard sampling
+            candidates = candidates[:n_trials * 3]
         
         # Find best candidate that preserves distances to already mapped locations
         best_error = float('inf')
         best_node = candidates[0] if candidates else nodes[np.random.randint(len(nodes))]
         
         for candidate_node in candidates:
-            # Compute total squared error against all already-mapped locations
+            # Compute total relative squared error against all already-mapped locations
             total_error = 0.0
             for mapped_loc_id, mapped_osm_node in map_loc.items():
                 total_error += compute_distance_error(loc_id, mapped_loc_id, candidate_node, mapped_osm_node)
+            
+            # Add scale regularization penalty
+            # Compute average OSM distance from home for this candidate
+            if home_id in map_loc:
+                home_node = map_loc[home_id]
+                osm_dist_from_home = haversine_distance(
+                    target_osm.nodes[home_node]['x'],
+                    target_osm.nodes[home_node]['y'],
+                    target_osm.nodes[candidate_node]['x'],
+                    target_osm.nodes[candidate_node]['y'],
+                ) / 1000.0  # Convert to km
+                
+                # Compute current average OSM distance from home (including this candidate)
+                avg_osm_scale = osm_dist_from_home
+                num_mapped = 1  # Count this candidate
+                for other_loc_id, other_osm_node in map_loc.items():
+                    if other_loc_id != home_id:
+                        other_dist = haversine_distance(
+                            target_osm.nodes[home_node]['x'],
+                            target_osm.nodes[home_node]['y'],
+                            target_osm.nodes[other_osm_node]['x'],
+                            target_osm.nodes[other_osm_node]['y'],
+                        ) / 1000.0
+                        avg_osm_scale += other_dist
+                        num_mapped += 1
+                
+                if num_mapped > 0:
+                    avg_osm_scale = avg_osm_scale / num_mapped
+                    
+                    # Symmetric scale penalty: penalize deviation in either direction
+                    # Prevents both expansion (too large) and collapse (too small)
+                    if imn_scale > 0:
+                        scale_deviation = (avg_osm_scale - imn_scale) / imn_scale
+                        scale_penalty = scale_deviation ** 2  # Squared relative deviation
+                        total_error += scale_penalty
             
             if total_error < best_error:
                 best_error = total_error
@@ -317,7 +474,8 @@ def map_imn_to_osm(imn, target_osm, n_trials=10, gdf_cumulative_p=None, activity
         SE += best_error
     
     # Step 3: Compute RMSE
-    # RMSE = sqrt(sum of squared errors / number of location pairs)
+    # RMSE = sqrt(sum of relative squared errors / number of location pairs)
+    # This is now a relative RMSE (unitless), representing average relative distance error
     num_locations = len(map_loc)
     if num_locations > 1:
         num_pairs = num_locations * (num_locations - 1) / 2

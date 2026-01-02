@@ -15,6 +15,9 @@ def simulate_synthetic_trips(
     precomputed_map_loc_rmse: Optional[Tuple[Dict[int, int], float]] = None,
     activity_pools: Optional[Dict[str, List[int]]] = None,
     user_id: Optional[int] = None,
+    original_stays: Optional[List] = None,
+    global_used_locations: Optional[Dict[str, set]] = None,
+    global_diversity_requirements: Optional[Dict[str, int]] = None,
 ) -> Tuple[List[Tuple[float, float, int]], Dict[Any, int], Dict[str, int], float, List[List[Tuple[float, float, int]]]]:
     """
     Simulate spatial trips for synthetic stays using precomputed IMN→OSM mapping.
@@ -73,6 +76,31 @@ def simulate_synthetic_trips(
     
     all_nodes = list(G.nodes())
     
+    # Use global diversity requirements (across all days) if provided, otherwise fall back to per-day
+    # Global diversity ensures we use ALL mapped locations over the entire timeline
+    if global_diversity_requirements is not None:
+        diversity_requirements = global_diversity_requirements
+    else:
+        # Fallback: calculate from original stays for this day (per-day diversity)
+        diversity_requirements: Dict[str, int] = {}
+        if original_stays is not None:
+            from collections import defaultdict
+            original_locations_by_activity = defaultdict(set)
+            for stay in original_stays:
+                if hasattr(stay, 'location_id') and hasattr(stay, 'activity_label'):
+                    act = str(stay.activity_label).lower()
+                    original_locations_by_activity[act].add(stay.location_id)
+            for act, loc_set in original_locations_by_activity.items():
+                diversity_requirements[act] = len(loc_set)
+    
+    # Use global tracking if provided (across all days), otherwise use local (per-day)
+    if global_used_locations is not None:
+        used_locations_per_activity = global_used_locations
+    else:
+        used_locations_per_activity: Dict[str, set] = {}
+    
+    required_diversity_per_activity: Dict[str, int] = {}  # How many distinct locations we still need
+    
     # Assign OSM nodes to each stay
     stay_nodes: List[int] = []
     for idx, (act, st, et) in enumerate(synthetic_stays):
@@ -94,16 +122,110 @@ def simulate_synthetic_trips(
                 # Shouldn't happen if precomputed mapping is complete, but fallback
                 stay_nodes.append(all_nodes[np.random.randint(len(all_nodes))])
         else:
-            # Priority 4: New activity not in IMN → sample once from activity pools
-            if activity_pools is not None:
-                sampled = sample_from_activity_pool(act_label, activity_pools, n=1, all_nodes=all_nodes)
-                if sampled:
-                    stay_nodes.append(sampled[0])
-                else:
-                    stay_nodes.append(all_nodes[np.random.randint(len(all_nodes))])
+            # Priority 4: Activity label (not location ID) → use frequency-weighted sampling from mapped locations
+            # First, check if user has mapped locations with this activity type
+            user_mapped_locations_for_activity = []
+            for loc_id, loc_data in imn.get('locations', {}).items():
+                loc_activity = str(loc_data.get('activity_label', 'unknown')).lower()
+                if loc_activity == act_label and loc_id in map_loc_imn:
+                    # This location is mapped and has the matching activity
+                    frequency = loc_data.get('frequency', 0)
+                    mapped_osm_node = map_loc_imn[loc_id]
+                    user_mapped_locations_for_activity.append((mapped_osm_node, frequency))
+            
+            if user_mapped_locations_for_activity:
+                # User has mapped locations for this activity → use diversity-aware frequency-weighted sampling
+                nodes_list = [node for node, _ in user_mapped_locations_for_activity]
+                frequencies = [freq for _, freq in user_mapped_locations_for_activity]
+                
+                # Initialize tracking for this activity if needed
+                if act_label not in used_locations_per_activity:
+                    used_locations_per_activity[act_label] = set()
+                # Ensure diversity requirement is set (may have been set on a previous day)
+                if act_label not in required_diversity_per_activity:
+                    # Set diversity requirement: use at least as many distinct locations as original
+                    required_diversity_per_activity[act_label] = diversity_requirements.get(act_label, 0)
+                
+                # Build candidate pools
+                unused_nodes = [node for node in nodes_list if node not in used_locations_per_activity[act_label]]
+                used_nodes = [node for node in nodes_list if node in used_locations_per_activity[act_label]]
+                
+                # Check diversity status
+                current_distinct_count = len(used_locations_per_activity[act_label])
+                required_diversity = required_diversity_per_activity[act_label]
+                remaining_diversity = required_diversity - current_distinct_count
+                
+                # Option 1: Soft constraint with rejection sampling
+                # Try natural frequency-weighted sampling, but enforce constraints
+                max_attempts = 10  # Prevent infinite loops
+                selected_node = None
+                
+                for attempt in range(max_attempts):
+                    # Sample with frequency weighting from all locations
+                    total_freq = sum(frequencies)
+                    if total_freq > 0:
+                        probabilities = [f / total_freq for f in frequencies]
+                        candidate_node = np.random.choice(nodes_list, p=probabilities)
+                    else:
+                        candidate_node = np.random.choice(nodes_list)
+                    
+                    # Check if candidate violates diversity constraints
+                    is_new_distinct = candidate_node not in used_locations_per_activity[act_label]
+                    
+                    if remaining_diversity > 0:
+                        # Below minimum: must select unused location
+                        if is_new_distinct:
+                            selected_node = candidate_node
+                            break
+                        # Reject: resample (will try again)
+                    elif remaining_diversity == 0:
+                        # At maximum: must reuse already-used location
+                        if not is_new_distinct:
+                            selected_node = candidate_node
+                            break
+                        # Reject: resample from used locations only
+                        if used_nodes:
+                            used_indices = [i for i, node in enumerate(nodes_list) if node in used_nodes]
+                            used_frequencies = [frequencies[i] for i in used_indices]
+                            total_used_freq = sum(used_frequencies)
+                            if total_used_freq > 0:
+                                used_probs = [f / total_used_freq for f in used_frequencies]
+                                selected_node = np.random.choice(used_nodes, p=used_probs)
+                            else:
+                                selected_node = np.random.choice(used_nodes)
+                            break
+                    else:
+                        # Above maximum (shouldn't happen): force reuse
+                        if not is_new_distinct:
+                            selected_node = candidate_node
+                            break
+                        if used_nodes:
+                            selected_node = np.random.choice(used_nodes)
+                            break
+                
+                # Fallback if all attempts failed
+                if selected_node is None:
+                    if remaining_diversity > 0 and unused_nodes:
+                        selected_node = np.random.choice(unused_nodes)
+                    elif used_nodes:
+                        selected_node = np.random.choice(used_nodes)
+                    else:
+                        selected_node = np.random.choice(nodes_list)
+                
+                # Track that we've used this location
+                used_locations_per_activity[act_label].add(selected_node)
+                stay_nodes.append(selected_node)
             else:
-                # No activity pools available → random fallback
-                stay_nodes.append(all_nodes[np.random.randint(len(all_nodes))])
+                # No mapped locations for this activity → fall back to city-wide activity pool
+                if activity_pools is not None:
+                    sampled = sample_from_activity_pool(act_label, activity_pools, n=1, all_nodes=all_nodes)
+                    if sampled:
+                        stay_nodes.append(sampled[0])
+                    else:
+                        stay_nodes.append(all_nodes[np.random.randint(len(all_nodes))])
+                else:
+                    # No activity pools available → random fallback
+                    stay_nodes.append(all_nodes[np.random.randint(len(all_nodes))])
     
     # Create mutable copy of stays for local time adjustments
     stays_mut = [[act, int(st), int(et)] for (act, st, et) in synthetic_stays]
