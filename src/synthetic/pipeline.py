@@ -23,6 +23,17 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_leve
     if not stays_by_day:
         print(f"  ⚠ No valid stays found for user {user_id}")
         return
+    
+    # Split home-to-home trips in original stays BEFORE temporal generation
+    # This ensures temporal generation sees "home → intermediate → home" instead of "home → home"
+    from src.synthetic.stays import split_home_to_home_trips_in_original_stays
+    stays_by_day = split_home_to_home_trips_in_original_stays(
+        stays_by_day, enriched, user_id, paths.data_dir
+    )
+    if not stays_by_day:  # Re-check if any stays remain after splitting
+        print(f"  ⚠ No valid stays found after home-to-home splitting for user {user_id}")
+        return
+    
     user_duration_probs, user_transition_probs, user_trip_duration_probs = build_stay_distributions(stays_by_day)
     user_probs_report(user_duration_probs, user_transition_probs, user_trip_duration_probs, user_id, paths.prob_dir())
     day_data = prepare_day_data(stays_by_day, user_duration_probs, user_transition_probs, randomness_levels, tz)
