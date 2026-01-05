@@ -52,7 +52,37 @@ def build_stay_distributions(stays_by_day: Dict) -> Tuple[Dict, Dict, Any]:
     return duration_probs, transition_probs, trip_duration_probs
 
 
-def generate_synthetic_day(original_stays, duration_probs: Dict, transition_probs: Dict, randomness: float = 0.5, day_length: int = 24 * 3600, tz=None, is_first_day: bool = False) -> List[Tuple[str, int, int]]:
+def build_population_transition_probs(all_users_stays_by_day: List[Dict]) -> Dict:
+    """
+    Build population-level transition probabilities by aggregating across all users.
+    This mimics competitor methods that don't consider individual patterns.
+    
+    Args:
+        all_users_stays_by_day: List of stays_by_day dictionaries, one per user
+        
+    Returns:
+        Dictionary mapping from_activity -> {to_activity: probability}
+    """
+    activity_transitions = defaultdict(list)
+    
+    for user_stays_by_day in all_users_stays_by_day:
+        for day, day_stays in user_stays_by_day.items():
+            for i in range(len(day_stays) - 1):
+                current_stay = day_stays[i]
+                next_stay = day_stays[i + 1]
+                activity_transitions[current_stay.activity_label].append(next_stay.activity_label)
+    
+    population_transition_probs = {}
+    for from_activity, to_activities in activity_transitions.items():
+        if len(to_activities) > 0:
+            unique_activities, counts = np.unique(to_activities, return_counts=True)
+            probs = counts / counts.sum()
+            population_transition_probs[from_activity] = dict(zip(unique_activities, probs))
+    
+    return population_transition_probs
+
+
+def generate_synthetic_day(original_stays, duration_probs: Dict, transition_probs: Dict, randomness: float = 0.5, day_length: int = 24 * 3600, tz=None, is_first_day: bool = False, population_transition_probs: Dict = None) -> List[Tuple[str, int, int]]:
     if not original_stays:
         return []
     first_dt = datetime.fromtimestamp(original_stays[0].start_time, tz)
@@ -109,7 +139,12 @@ def generate_synthetic_day(original_stays, duration_probs: Dict, transition_prob
         elif np.random.random() < (1 - randomness):
             act = s.activity_label
         else:
-            if prev_activity in transition_probs:
+            # With high randomness (r=1.0), use population transitions if available (mimics competitor methods)
+            # Otherwise fall back to individual transitions
+            if randomness >= 1.0 and population_transition_probs is not None and prev_activity in population_transition_probs:
+                to_probs = population_transition_probs[prev_activity]
+                act = list(to_probs.keys())[np.random.choice(len(to_probs), p=list(to_probs.values()))]
+            elif prev_activity in transition_probs:
                 to_probs = transition_probs[prev_activity]
                 act = list(to_probs.keys())[np.random.choice(len(to_probs), p=list(to_probs.values()))]
             else:
@@ -141,7 +176,12 @@ def generate_synthetic_day(original_stays, duration_probs: Dict, transition_prob
         if np.random.random() < (1 - randomness):
             act = s.activity_label
         else:
-            if prev_activity in transition_probs:
+            # With high randomness (r=1.0), use population transitions if available (mimics competitor methods)
+            # Otherwise fall back to individual transitions
+            if randomness >= 1.0 and population_transition_probs is not None and prev_activity in population_transition_probs:
+                to_probs = population_transition_probs[prev_activity]
+                act = list(to_probs.keys())[np.random.choice(len(to_probs), p=list(to_probs.values()))]
+            elif prev_activity in transition_probs:
                 to_probs = transition_probs[prev_activity]
                 act = list(to_probs.keys())[np.random.choice(len(to_probs), p=list(to_probs.values()))]
             else:
@@ -238,7 +278,7 @@ def generate_synthetic_day(original_stays, duration_probs: Dict, transition_prob
     return synthetic_stays
 
 
-def prepare_day_data(stays_by_day: Dict, user_duration_probs: Dict, user_transition_probs: Dict, randomness_levels: List[float], tz) -> Dict:
+def prepare_day_data(stays_by_day: Dict, user_duration_probs: Dict, user_transition_probs: Dict, randomness_levels: List[float], tz, population_transition_probs: Dict = None) -> Dict:
     from datetime import datetime
     day_data = {}
     # Determine the first day of the user's mobility timeline
@@ -259,7 +299,7 @@ def prepare_day_data(stays_by_day: Dict, user_duration_probs: Dict, user_transit
         
         synthetic_dict = {}
         for r in randomness_levels:
-            synthetic = generate_synthetic_day(day, user_duration_probs, user_transition_probs, randomness=r, tz=tz, is_first_day=is_first_day)
+            synthetic = generate_synthetic_day(day, user_duration_probs, user_transition_probs, randomness=r, tz=tz, is_first_day=is_first_day, population_transition_probs=population_transition_probs)
             synthetic_dict[r] = synthetic
         anchor = find_anchor_stay_for_day(day)
         anchor_tuple = None

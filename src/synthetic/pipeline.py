@@ -15,7 +15,7 @@ from src.visualization.timelines import save_user_timelines
 from src.visualization.maps import generate_interactive_porto_map_multi, generate_interactive_original_city_map, create_split_map_html
 
 
-def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_levels: List[float], paths: PathsConfig, tz, G, gdf_cumulative_p, activity_pools: Dict[str, List[int]], use_random_mapping: bool = False) -> None:
+def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_levels: List[float], paths: PathsConfig, tz, G, gdf_cumulative_p, activity_pools: Dict[str, List[int]], use_random_mapping: bool = False, population_transition_probs: Dict = None) -> None:
     print(f"Processing user {user_id}...")
     enriched = enrich_imn_with_poi(imn, poi_info)
     stays = read_stays_from_trips(enriched['trips'], enriched['locations'])
@@ -25,7 +25,7 @@ def process_single_user(user_id: int, imn: Dict, poi_info: Dict, randomness_leve
         return
     user_duration_probs, user_transition_probs, user_trip_duration_probs = build_stay_distributions(stays_by_day)
     user_probs_report(user_duration_probs, user_transition_probs, user_trip_duration_probs, user_id, paths.prob_dir())
-    day_data = prepare_day_data(stays_by_day, user_duration_probs, user_transition_probs, randomness_levels, tz)
+    day_data = prepare_day_data(stays_by_day, user_duration_probs, user_transition_probs, randomness_levels, tz, population_transition_probs=population_transition_probs)
 
     # Save timeline visualization PNG per user via visualization module
     try:
@@ -187,12 +187,32 @@ def run_pipeline(paths: PathsConfig, randomness_levels: List[float], tz) -> None
         print(f"⚠ Spatial resources setup failed: {e}")
         G, gdf_cumulative_p, activity_pools = None, None, None
 
+    # Compute population-level transition probabilities (for high randomness to mimic competitor methods)
+    print(f"\nComputing population-level transition probabilities...")
+    from src.synthetic.timelines import build_population_transition_probs
+    from src.synthetic.enrich import enrich_imn_with_poi
+    from src.synthetic.stays import read_stays_from_trips, extract_stays_by_day
+    
+    all_users_stays_by_day = []
+    for uid, imn in imns.items():
+        try:
+            enriched = enrich_imn_with_poi(imn, poi_data.get(uid, {}))
+            stays = read_stays_from_trips(enriched['trips'], enriched['locations'])
+            stays_by_day = extract_stays_by_day(stays, tz)
+            if stays_by_day:
+                all_users_stays_by_day.append(stays_by_day)
+        except Exception:
+            continue  # Skip users that fail
+    
+    population_transition_probs = build_population_transition_probs(all_users_stays_by_day)
+    print(f"✓ Computed population transitions for {len(population_transition_probs)} activity types")
+
     print(f"\nProcessing {len(imns)} users...")
     print("-" * 40)
     
     # # TEMPORARY: Only process user 12140 for testing diversity-aware sampling
     # # TODO: Remove this condition after testing
-    # TEST_USER_ID = 12140
+    # TEST_USER_ID = 117538
     
     for idx, uid in enumerate(imns.keys(), 1):
         # if uid != TEST_USER_ID:
@@ -201,7 +221,7 @@ def run_pipeline(paths: PathsConfig, randomness_levels: List[float], tz) -> None
         
         print(f"[{idx}/{len(imns)}] ")
         try:
-            process_single_user(uid, imns[uid], poi_data[uid], randomness_levels, paths, tz, G, gdf_cumulative_p, activity_pools, paths.use_random_mapping)
+            process_single_user(uid, imns[uid], poi_data[uid], randomness_levels, paths, tz, G, gdf_cumulative_p, activity_pools, paths.use_random_mapping, population_transition_probs=population_transition_probs)
         except Exception as e:
             print(f"!! Error processing user {uid}: {e}")
 
